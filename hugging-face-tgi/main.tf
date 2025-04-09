@@ -53,13 +53,13 @@ provider "helm" {
 }
 
 module "namespace" {
-  source           = "../../modules/kubernetes-namespace"
+  source           = "../common/modules/kubernetes-namespace"
   create_namespace = true
   namespace        = var.namespace
 }
 
 module "inference-server" {
-  source            = "../../modules/inference-service"
+  source            = "../common/modules/inference-service"
   namespace         = var.namespace
   additional_labels = var.additional_labels
   autopilot_cluster = var.autopilot_cluster
@@ -68,7 +68,7 @@ module "inference-server" {
 
 resource "helm_release" "gmp-engine" {
   name      = "gmp-engine"
-  chart     = "${path.module}/../../charts/gmp-engine/"
+  chart     = "${path.module}/../common/charts/gmp-engine/"
   namespace = var.namespace
   # Timeout is increased to guarantee sufficient scale-up time for Autopilot nodes.
   timeout = 1200
