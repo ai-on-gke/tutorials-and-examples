@@ -18,7 +18,7 @@ locals {
 }
 
 module "custom_network" {
-  source       = "../../common/modules/gcp-network"
+  source       = "github.com/ai-on-gke/common-infra/common/modules/gcp-network"
   project_id   = var.project_id
   network_name = local.network_name
   create_psa   = true
