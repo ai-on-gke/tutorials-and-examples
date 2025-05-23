@@ -14,7 +14,6 @@ steps:
     cp security_test/config.yaml /workspace/security_test/config.yaml
     cp -r security_test/allowlist/* /workspace/security_test/allowlist/ || echo "Allowlist folder is empty or not found"
   allowFailure: true
-  waitFor: ['Generate Kubeconfig']
 - id: 'Run Shipshape on helm'
   name: 'gcr.io/cloud-builders/docker'
   entrypoint: 'bash'
