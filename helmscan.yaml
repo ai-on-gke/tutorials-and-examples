@@ -47,3 +47,7 @@ steps:
   waitFor: ['Run Shipshape on helm']
 substitutions:
   _SHIPSHAPE_IMAGE: us-docker.pkg.dev/k8ssecurityvalidation-agent/k8ssecurityvalidation-agent/k8ssecurityvalidation-agent@sha256:cd45e6cd84e9a45462ddbca18c4731fd4e264d517ee98131eb5be4eb57691f44
+# Fail the build if there are any violations
+timeout: '12000s'
+options:
+  logging: CLOUD_LOGGING_ONLY
