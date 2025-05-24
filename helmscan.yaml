@@ -34,7 +34,7 @@ steps:
   allowFailure: true
   waitFor: ['Copy metadata']
 - id: 'Check result'
-  name: '$PROJECT_ID Results'
+  name: 'results'
   entrypoint: 'bash'
   args:
   - '-c'
