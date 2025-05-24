@@ -34,7 +34,7 @@ steps:
   allowFailure: true
   waitFor: ['Copy metadata']
 - id: 'Check result'
-  name: 'gcr.io/$PROJECT_ID/terraform'
+  name: '$PROJECT_ID Results'
   entrypoint: 'bash'
   args:
   - '-c'
