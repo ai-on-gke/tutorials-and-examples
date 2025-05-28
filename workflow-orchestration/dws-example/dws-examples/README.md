@@ -37,7 +37,7 @@ kubectl apply -f dws-queues.yaml
 
 ### Validate installation
 
-Verify the Kueue installation in you GKE cluster
+Verify the Kueue installation in your GKE cluster
 
 ```bash
 kubectl get clusterqueues dws-cluster-queue -o jsonpath="{range .status.conditions[?(@.type == \"Active\")]}CQ - Active: {@.status} Reason: {@.reason} Message: {@.message}{'\n'}{end}"
