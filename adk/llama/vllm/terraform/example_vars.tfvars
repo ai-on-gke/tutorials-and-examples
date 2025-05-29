@@ -37,7 +37,7 @@ create_service_account = false
 create_brand           = false
 ray_dashboard_add_auth = false
 
-autopilot_cluster = false
+autopilot_cluster = true
 
 gpu_pools = [{
   name               = "gpu-pool-l4-1"
