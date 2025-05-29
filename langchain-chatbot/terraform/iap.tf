@@ -13,7 +13,7 @@
 # limitations under the License.
 
 module "iap_auth" {
-  source = "github.com/ai-on-gke/common-infra/common/modules/iap?ref=main"
+  source = "github.com/ai-on-gke/common-infra//common/modules/iap?ref=main"
 
   project_id               = var.project_id
   namespace                = var.k8s_namespace

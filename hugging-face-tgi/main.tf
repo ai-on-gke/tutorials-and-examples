@@ -53,13 +53,13 @@ provider "helm" {
 }
 
 module "namespace" {
-  source           = "github.com/ai-on-gke/common-infra/common/modules/kubernetes-namespace?ref=main"
+  source           = "github.com/ai-on-gke/common-infra//common/modules/kubernetes-namespace?ref=main"
   create_namespace = true
   namespace        = var.namespace
 }
 
 module "inference-server" {
-  source            = "github.com/ai-on-gke/common-infra/common/modules/inference-service?ref=main"
+  source            = "github.com/ai-on-gke/common-infra//common/modules/inference-service?ref=main"
   namespace         = var.namespace
   additional_labels = var.additional_labels
   autopilot_cluster = var.autopilot_cluster
