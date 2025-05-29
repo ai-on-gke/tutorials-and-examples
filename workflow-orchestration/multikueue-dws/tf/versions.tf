@@ -17,18 +17,5 @@ terraform {
     google = {
       source = "hashicorp/google"
     }
-
-resource "random_string" "bucket_suffix" {
-  length  = 8
-  special = false
-}
-
-resource "google_storage_bucket" "random_bucket" {
-  name     = "random-bucket-${random_string.bucket_suffix.result}"
-  location = "US"
-
-  uniform_access_prevention = false
-}
-
   }
 }
