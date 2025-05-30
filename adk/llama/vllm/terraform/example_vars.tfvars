@@ -40,17 +40,20 @@ ray_dashboard_add_auth = false
 autopilot_cluster = true
 
 gpu_pools = [{
-  name               = "gpu-pool-l4-1"
-  machine_type       = "g2-standard-4"
-  autoscaling        = true
-  min_count          = 1
+  name           = "gpu-pool-l4"
+  machine_type   = "g2-standard-24"
+  node_locations = "us-east4-c"
+  autoscaling    = true
+
+  min_count          = 0
   max_count          = 3
-  disk_size_gb       = 100
-  disk_type          = "pd-balanced"
+  accelerator_count  = 2
+  disk_size_gb       = 200
   enable_gcfs        = true
-  accelerator_count  = 1
-  accelerator_type   = "nvidia-tesla-t4"
-  gpu_driver_version = "DEFAULT"
+  logging_variant    = "DEFAULT"
+  disk_type          = "pd-balanced"
+  accelerator_type   = "nvidia-l4"
+  gpu_driver_version = "LATEST"
 }]
 
 enable_gpu = true
