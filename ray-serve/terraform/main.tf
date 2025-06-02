@@ -52,6 +52,14 @@ resource "google_storage_bucket_iam_member" "cloudbuild_storage_viewer" {
   member = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
 }
 
+resource "google_artifact_registry_repository_iam_member" "cloudbuild_artifact_writer" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.image_repo.location
+  repository = google_artifact_registry_repository.image_repo.repository_id
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
+}
+
 locals {
   cluster_membership_id = var.cluster_membership_id == "" ? local.cluster_name : var.cluster_membership_id
   host                  = var.private_cluster ? "https://connectgateway.googleapis.com/v1/projects/${data.google_project.project.number}/locations/${var.cluster_location}/gkeMemberships/${local.cluster_membership_id}" : "https://${module.gke_cluster.endpoint}"
