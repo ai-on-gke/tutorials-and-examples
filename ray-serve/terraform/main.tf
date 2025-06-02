@@ -46,6 +46,12 @@ module "gke_cluster" {
   depends_on        = [module.custom_network]
 }
 
+resource "google_storage_bucket_iam_member" "cloudbuild_storage_viewer" {
+  bucket = "${var.project_id}_cloudbuild"
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
+}
+
 locals {
   cluster_membership_id = var.cluster_membership_id == "" ? local.cluster_name : var.cluster_membership_id
   host                  = var.private_cluster ? "https://connectgateway.googleapis.com/v1/projects/${data.google_project.project.number}/locations/${var.cluster_location}/gkeMemberships/${local.cluster_membership_id}" : "https://${module.gke_cluster.endpoint}"
