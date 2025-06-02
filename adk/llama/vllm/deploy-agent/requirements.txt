@@ -1,2 +1,2 @@
-google_adk
-litellm
+google_adk==0.5.0
+litellm==1.68.0

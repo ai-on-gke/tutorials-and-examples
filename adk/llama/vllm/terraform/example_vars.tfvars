@@ -20,7 +20,7 @@ project_id = "<PROJECT_ID>"
 ## this is required for terraform to connect to GKE master and deploy workloads
 create_cluster   = true # this flag will create a new standard public gke cluster in default network
 cluster_name     = "<CLUSTER_NAME>"
-cluster_location = "us-central1"
+cluster_location = "us-east4"
 
 #######################################################
 ####    APPLICATIONS
