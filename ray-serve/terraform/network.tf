@@ -32,4 +32,5 @@ module "custom_network" {
       description           = "Network for Google ADK tutorial"
     }
   ]
+  depends_on = [google_project_service.cloudresourcemanager]
 }

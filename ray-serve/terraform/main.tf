@@ -21,6 +21,15 @@ locals {
   cluster_name = var.cluster_name != "" ? var.cluster_name : var.default_resource_name
 }
 
+# Enable Cloud Resource Manager API
+resource "google_project_service" "cloudresourcemanager" {
+  project = var.project_id
+  service = "cloudresourcemanager.googleapis.com"
+
+  # Prevent disabling the API if it's already enabled
+  disable_on_destroy = false
+}
+
 module "gke_cluster" {
   source            = "github.com/ai-on-gke/common-infra//common/infrastructure?ref=main"
   project_id        = var.project_id
