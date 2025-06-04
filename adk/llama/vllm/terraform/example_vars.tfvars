@@ -26,9 +26,6 @@ cluster_location = "us-east4"
 ####    APPLICATIONS
 #######################################################
 
-## GKE environment variables
-kubernetes_namespace = "<KUBERNETES_NAMESPACE>"
-
 # Creates a google service account & k8s service account & configures workload identity with appropriate permissions.
 # Set to false & update the variable `workload_identity_service_account` to use an existing IAM service account.
 create_service_account = false
