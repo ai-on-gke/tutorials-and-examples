@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-mcp-server
+  labels:
+    app: weather-mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: weather-mcp-server
+  template:
+    metadata:
+      labels:
+        app: weather-mcp-server
+    spec:
+      serviceAccount: adk-ray-agent-sa
+      containers:
+      - name: weather-mcp-server
+        image: us-docker.pkg.dev/<PROJECT_ID>/llama-ray-mcp/mcp-server:latest
+        ports:
+        - name: http-mcp
+          containerPort: 50051
+        env:
+        - name: MCP_SERVER_HOST
+          value: "0.0.0.0"
+        - name: MCP_SERVER_PORT
+          value: "50051"
+        resources:
+          requests:
+            cpu: "300m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "500Mi"
+        readinessProbe:
+          tcpSocket:
+            port: http-mcp
+          initialDelaySeconds: 15 # Time to wait before first probe
+          periodSeconds: 10    # How often to probe
+          timeoutSeconds: 5
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-mcp-server
+spec:
+  type: ClusterIP
+  selector:
+    app: weather-mcp-server
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: http-mcp
