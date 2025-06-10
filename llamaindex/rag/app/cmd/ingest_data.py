@@ -5,51 +5,40 @@ import pandas as pd
 import logging
 
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.core.ingestion import (
-    DocstoreStrategy,
-    IngestionPipeline,
-    IngestionCache,
-)
-from llama_index.storage.kvstore.redis import RedisKVStore as RedisCache
-from llama_index.storage.docstore.redis import RedisDocumentStore
+from llama_index.core.ingestion import IngestionPipeline
 from llama_index.vector_stores.redis import RedisVectorStore
 from llama_index.core import Document, VectorStoreIndex, SimpleDirectoryReader
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Add package to PYTHONPATH
 sys.path.append(str(pathlib.Path(__file__).parent.parent.absolute()))
 from rag_demo import custom_schema, getenv_or_exit
 
+# Environment variables
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5")
 REDIS_HOST = getenv_or_exit("REDIS_HOST")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 INPUT_DIR = getenv_or_exit("INPUT_DIR")
 
+# Initialize embedding model
 embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL_NAME)
 
+# Initialize vector store
 vector_store = RedisVectorStore(
     schema=custom_schema,
     redis_url=f"redis://{REDIS_HOST}:{REDIS_PORT}",
 )
 
-cache = IngestionCache(
-    cache=RedisCache.from_host_and_port(REDIS_HOST, REDIS_PORT),
-    collection="movie_cache",
-)
-
+# Set up minimal ingestion pipeline
 pipeline = IngestionPipeline(
-    transformations=[
-        embed_model, 
-    ],
-    docstore=RedisDocumentStore.from_host_and_port(
-        REDIS_HOST, REDIS_PORT, namespace="movie_doc_store"
-    ),
+    transformations=[embed_model],
     vector_store=vector_store,
-    cache=cache,
-    docstore_strategy=DocstoreStrategy.UPSERTS,
 )
 
+# Initialize index
 index = VectorStoreIndex.from_vector_store(
     vector_store,
     embed_model=embed_model
@@ -58,6 +47,7 @@ index = VectorStoreIndex.from_vector_store(
 def load_data(reader: SimpleDirectoryReader):
     """Load CSV data from directory and convert to LlamaIndex Documents."""
     try:
+        # Load all files in INPUT_DIR (expecting CSV files)
         files = reader.load_data()
         documents = []
         
@@ -66,6 +56,7 @@ def load_data(reader: SimpleDirectoryReader):
             logger.info(f"Processing file: {file_path}")
             df = pd.read_csv(file_path)
             
+            # Convert each row to a Document
             for _, row in df.iterrows():
                 text = (
                     f"Title: {row['Series_Title']}\n"
@@ -80,9 +71,9 @@ def load_data(reader: SimpleDirectoryReader):
                     text=text,
                     metadata={
                         "series_title": row["Series_Title"],
-                        "released_year": str(row["Released_Year"]),  
+                        "released_year": str(row["Released_Year"]),
                         "genre": row["Genre"],
-                        "imdb_rating": float(row["IMDB_Rating"]), 
+                        "imdb_rating": float(row["IMDB_Rating"]),
                         "overview": row["Overview"],
                         "director": row["Director"],
                         "stars": f"{row['Star1']}, {row['Star2']}, {row['Star3']}, {row['Star4']}",
@@ -103,5 +94,19 @@ reader = SimpleDirectoryReader(input_dir=INPUT_DIR)
 docs = load_data(reader)
 logger.info(f"Loaded {len(docs)} documents")
 
-nodes = pipeline.run(documents=docs, show_progress=True)
+# Process documents individually
+nodes = []
+for doc in docs:
+    logger.info(f"Ingesting document: {doc.id_}")
+    try:
+        # Generate embedding manually to debug
+        embedding = embed_model.get_text_embedding(doc.text)
+        logger.info(f"Embedding generated for {doc.id_}: {len(embedding)} dimensions")
+        # Run pipeline
+        node_list = pipeline.run(documents=[doc], show_progress=True)
+        nodes.extend(node_list)
+        logger.info(f"Nodes created for {doc.id_}: {len(node_list)}")
+    except Exception as e:
+        logger.error(f"Error ingesting document {doc.id_}: {str(e)}")
+
 logger.info(f"Ingested {len(nodes)} nodes")

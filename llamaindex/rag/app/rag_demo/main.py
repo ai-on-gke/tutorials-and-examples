@@ -5,6 +5,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import re
 
 from llama_index.core import VectorStoreIndex
 from llama_index.vector_stores.redis import RedisVectorStore
@@ -14,11 +15,13 @@ from llama_index.core.tools import QueryEngineTool
 from llama_index.core.agent import ReActAgent
 from llama_index.core import PromptTemplate
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from rag_demo import custom_schema, getenv_or_exit
 
+# Environment variables
 MODEL_NAME = getenv_or_exit("MODEL_NAME")
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5")
 REDIS_HOST = getenv_or_exit("REDIS_HOST")
@@ -82,7 +85,7 @@ class MovieRecommendationAgent(ReActAgent):
         try:
             logger.info(f"Processing query: {message}")
             response = query_engine.query(message)
-            logger.info(f"Query response: {response}")
+            logger.info(f"Raw LLM response: {response.response}")
             
             if not response.source_nodes:
                 logger.warning("No source nodes found for query")
@@ -91,25 +94,52 @@ class MovieRecommendationAgent(ReActAgent):
                     "recommendations": []
                 }
             
-            # Format recommendations
+            # Parse LLM response with flexible regex
             recommendations = []
-            for node in response.source_nodes:
-                metadata = node.node.metadata
-                logger.info(f"Node metadata: {metadata}")
+            movie_blocks = re.finditer(
+                r"\*\*(?:\d+\.\s*)?(.+?)\s*\((\d{4})\)\s*\**\n"  # Title and year
+                r"(?:.*?\n)*?"  # Optional lines
+                r"\*\s+\*\*IMDb Rating:\*\*\s*([\d.]+)(?:/10)?\n"  # Rating (with or without /10)
+                r"\*\s+\*\*Overview:\*\*\s*(.+?)\n"  # Overview
+                r"\*\s+\*\*Genre:\*\*\s*(.+?)\n"  # Genre
+                r"(?:.*?\n)*?"  # Optional lines
+                r"\*\s+\*\*Director:\*\*\s*(.+?)\n"  # Director
+                r"\*\s+\*\*Stars:\*\*\s*(.+?)(?=\n(?:\n|\Z|\*))",  # Stars until double newline or end
+                str(response.response),
+                re.DOTALL
+            )
+            for block in movie_blocks:
                 recommendations.append({
-                    "title": metadata["series_title"],
-                    "imdb_rating": metadata["imdb_rating"],
-                    "overview": metadata["overview"],
-                    "genre": metadata["genre"],
-                    "released_year": metadata["released_year"],
-                    "director": metadata["director"],
-                    "stars": metadata["stars"]
+                    "title": block.group(1).strip(),
+                    "imdb_rating": float(block.group(3)),
+                    "overview": block.group(4).strip(),
+                    "genre": block.group(5).strip(),
+                    "released_year": block.group(2),
+                    "director": block.group(6).strip(),
+                    "stars": block.group(7).strip()
                 })
             
-            return {
+            if not recommendations:
+                logger.warning("No recommendations parsed from LLM response")
+                for node in response.source_nodes:
+                    metadata = node.node.metadata
+                    logger.info(f"Node metadata: {metadata}")
+                    recommendations.append({
+                        "title": metadata["series_title"],
+                        "imdb_rating": metadata["imdb_rating"],
+                        "overview": metadata["overview"],
+                        "genre": metadata["genre"],
+                        "released_year": metadata["released_year"],
+                        "director": metadata["director"],
+                        "stars": metadata["stars"]
+                    })
+            
+            result = {
                 "message": "Here are the top movie recommendations:",
-                "recommendations": recommendations
+                "recommendations": recommendations[:3]
             }
+            logger.info(f"Final response: {result}")
+            return result
         except Exception as e:
             logger.error(f"Error processing query: {str(e)}")
             return {
@@ -131,6 +161,7 @@ def get_agent():
 # FastAPI app
 app = FastAPI()
 
+# Pydantic model for request
 class QueryRequest(BaseModel):
     query: str
 
