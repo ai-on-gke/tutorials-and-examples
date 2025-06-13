@@ -3,10 +3,10 @@ import json
 
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import BaseSessionService, InMemorySessionService
 from google.genai import types
 
-from agents.weather_agent.agent import root_agent
+from weather_agent.agent import root_agent
 
 
 APP_NAME = "agent_comparison_app"
@@ -14,6 +14,7 @@ USER_ID = "test_user_456"
 SESSION_ID_TOOL_AGENT = "session_tool_agent_xyz"
 
 async def call_agent_and_print(
+    session_service: BaseSessionService,
     runner_instance: Runner,
     agent_instance: LlmAgent,
     session_id: str,
@@ -33,7 +34,7 @@ async def call_agent_and_print(
 
     print(f"<<< Agent '{agent_instance.name}' Response: {final_response_content}")
 
-    current_session = session_service.get_session(app_name=APP_NAME,
+    current_session = await session_service.get_session(app_name=APP_NAME,
                                                   user_id=USER_ID,
                                                   session_id=session_id)
     stored_output = current_session.state.get(agent_instance.output_key)
@@ -63,10 +64,10 @@ async def test_weather_agent():
     )
 
     print("--- Testing Agent with Tool ---")
-    await call_agent_and_print(weather_runner, root_agent, SESSION_ID_TOOL_AGENT, '{"city": "Paris"}')
-    await call_agent_and_print(weather_runner, root_agent, SESSION_ID_TOOL_AGENT, '{"city": "Tokyo"}')
+    await call_agent_and_print(session_service, weather_runner, root_agent, SESSION_ID_TOOL_AGENT, "What's the weather like in Paris?")
+    await call_agent_and_print(session_service, weather_runner, root_agent, SESSION_ID_TOOL_AGENT, "How about New York?")
 
 
 # This module seems to get loaded so we should not execute as part of the main app.
 #if __name__ == "__main__":
-#    asyncio.run(test())
+#    asyncio.run(test_weather_agent())
