@@ -44,7 +44,7 @@ module "gke_cluster" {
 locals {
   cluster_membership_id = var.cluster_membership_id == "" ? local.cluster_name : var.cluster_membership_id
   host                  = var.private_cluster ? "https://connectgateway.googleapis.com/v1/projects/${data.google_project.project.number}/locations/${var.cluster_location}/gkeMemberships/${local.cluster_membership_id}" : "https://${module.gke_cluster.endpoint}"
-
+  cluster_ca_certificate = var.private_cluster ? "" : base64decode(module.gke_cluster.ca_certificate)
 }
 
 provider "kubernetes" {
@@ -61,3 +61,4 @@ provider "kubernetes" {
     }
   }
 }
+

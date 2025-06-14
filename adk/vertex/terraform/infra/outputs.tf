@@ -25,6 +25,23 @@ output "gke_cluster_location" {
   description = "GKE cluster location"
 }
 
+output "private_cluster" {
+  value = var.private_cluster
+}
+
+output "cluster_membership_id" {
+  value = local.cluster_membership_id
+}
+
+output "cluster_host" {
+  value = local.host
+}
+
+output "cluster_ca_certificate" {
+  value = local.cluster_ca_certificate
+  sensitive = true
+}
+
 output "image_repository_name" {
   value = local.image_repository_name
 }
@@ -40,3 +57,4 @@ output "image_repository_full_name" {
 output "k8s_service_account_name" {
   value = local.k8s_service_account_name
 }
+
