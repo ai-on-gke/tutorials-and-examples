@@ -1,5 +1,5 @@
-vllm>=0.8.5
-transformers[torch]>=4.51.1
-fastapi>=0.95.0
-uvicorn>=0.22.0
-starlette>=0.35.0
+vllm==0.8.5
+transformers[torch]==4.52.4
+fastapi==0.115.12
+uvicorn==0.22.0
+starlette==0.46.2

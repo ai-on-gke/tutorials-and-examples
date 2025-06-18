@@ -12,7 +12,7 @@ spec:
         env_vars:
           MODEL_ID: "meta-llama/Llama-3.1-8B-Instruct"
           TENSOR_PARALLELISM: "2"
-          MAX_MODEL_LEN: "2048"
+          MAX_MODEL_LEN: "32768"
           CHAT_TEMPLATE_PATH: "/templates/tool_chat_template_llama3.1_json.jinja"
           VLLM_ENABLE_AUTO_TOOL_CHOICE: "true"
           TOOL_PARSER_NAME: "llama3_json"
@@ -21,8 +21,9 @@ spec:
         num_replicas: 1
         ray_actor_options:
           num_cpus: 2
-          # num_gpus 
+          # num_gpus
   rayClusterConfig:
+    rayVersion: 'nightly-gpu'
     headGroupSpec:
       rayStartParams:
         dashboard-host: "0.0.0.0"
@@ -53,7 +54,7 @@ spec:
                   memory: "8Gi"
                   ephemeral-storage: "10Gi"
               ports:
-                  # Ray Global Control Store 
+                  # Ray Global Control Store
                   # Handles cluster metadata management, actor discovery, other control plane operations
                   # All Ray workers and drivers connect to this port
                 - containerPort: 6379
