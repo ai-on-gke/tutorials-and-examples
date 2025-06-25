@@ -1,4 +1,4 @@
-vllm==0.8.5
+vllm==0.9.0
 transformers[torch]==4.52.4
 fastapi==0.115.12
 uvicorn==0.22.0
