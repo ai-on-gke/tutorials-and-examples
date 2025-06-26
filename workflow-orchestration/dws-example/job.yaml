@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: sample-job-
+  name: sample-job
   namespace: default
   labels:
     kueue.x-k8s.io/queue-name: dws-local-queue
@@ -14,7 +14,7 @@ spec:
   template:
     spec:
       nodeSelector:
-        cloud.google.com/gke-accelerator: "nvidia-tesla-t4"
+        cloud.google.com/gke-nodepool: NODEPOOL_NAME
       tolerations:
         - key: "nvidia.com/gpu"
           operator: "Exists"

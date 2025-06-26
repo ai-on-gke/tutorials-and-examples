@@ -69,7 +69,7 @@ You should see output similar to this:
 
 ```bash
 NAME                                 ACCEPTED   PROVISIONED   FAILED   AGE
-job-dws-job-bq9r9-9409b-dws-prov-1   True       False                   158m
+sample-dws-job-bq9r9-9409b-dws-prov-1   True       False                   158m
 ```
 
 Kueue creates the provisioning request, which is integrated with DWS. If DWS receives and accepts the request, the ACCEPTED value will be True. Then, as soon as DWS can secure access to your resources, the PROVISIONED value will change to TRUE. At that point, the node is created, and the job schedules on that node. Once the job finishes, GKE automatically releases the node.
