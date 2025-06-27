@@ -149,6 +149,12 @@ steps:
     kubectl port-forward svc/adk-agent 8080:80
     sleep 5
 
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+    python3 /workspace/ci-resources/adk/vertex/tests/test.py http://127.0.0.1:8080
+
     echo "pass" > /workspace/adk_vertex_test_guide.txt
   allowFailure: true
   waitFor: ['adk-vertex: generate kubeconfig']
