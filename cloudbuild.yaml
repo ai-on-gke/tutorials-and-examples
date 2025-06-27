@@ -180,7 +180,7 @@ steps:
   waitFor: ['adk-vertex: test guide']
 
 - id: 'check result'
-  name: "hashicorp/terraform:latest"
+  name: "ubuntu"
   entrypoint: 'bash'
   waitFor: ['adk-vertex: cleanup gke cluster']
   args:
@@ -190,20 +190,20 @@ steps:
 
     echo "pass" > /workspace/check_result.txt
 
-    # if [[ $(cat /workspace/adk_vertex_gke_cluster_result.txt) != "pass" ]]; then
-    #   echo "adk vertex gke cluster creation failed"
-    #   echo "error" > /workspace/check_result.txt
-    # fi
+    if [[ $(cat /workspace/adk_vertex_gke_cluster_result.txt) != "pass" ]]; then
+      echo "adk vertex gke cluster creation failed"
+      echo "error" > /workspace/check_result.txt
+    fi
 
-    # if [[ $(cat /workspace/adk_vertex_test_guide.txt) != "pass" ]]; then
-    #   echo "adk vertex test guide failed"
-    #   echo "error" > /workspace/check_result.txt
-    # fi
+    if [[ $(cat /workspace/adk_vertex_test_guide.txt) != "pass" ]]; then
+      echo "adk vertex test guide failed"
+      echo "error" > /workspace/check_result.txt
+    fi
 
-    # if [[ $(cat /workspace/adk_vertex_cleanup_gke_cluster.txt) != "pass" ]]; then
-    #   echo "adk vertex gke cluster cleanup failed"
-    #   echo "error" > /workspace/check_result.txt
-    # fi
+    if [[ $(cat /workspace/adk_vertex_cleanup_gke_cluster.txt) != "pass" ]]; then
+      echo "adk vertex gke cluster cleanup failed"
+      echo "error" > /workspace/check_result.txt
+    fi
 
     if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
       cat /workspace/check_result.txt
