@@ -76,8 +76,8 @@ steps:
     echo "fail" > /workspace/adk_vertex_test_guide.txt
 
     gcloud builds submit \
-        --tag $(terraform output -raw image_repository_full_name)/adk-agent:latest \
-        --project=$(terraform output -raw project_id) \
+        --tag us-docker.pkg.dev/${PROJECT_ID}/ml-adk-vertex-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-${_AUTOPILOT_CLUSTER}/adk-agent:latest \
+        --project=$PROJECT_ID \
         ../app
 
     cat <<  EOF > ../app/deployment.yaml
@@ -95,11 +95,11 @@ steps:
           labels:
             app: adk-agent
         spec:
-          serviceAccount: $(terraform output -raw k8s_service_account_name)
+          serviceAccount: ml-adk-vertex-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-${_AUTOPILOT_CLUSTER}-sa
           containers:
           - name: adk-agent
             imagePullPolicy: Always
-            image: $(terraform output -raw image_repository_full_name)/adk-agent:latest
+            image: us-docker.pkg.dev/${PROJECT_ID}/ml-adk-vertex-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-${_AUTOPILOT_CLUSTER}/adk-agent:latest
             resources:
               limits:
                 memory: "256Mi"
@@ -115,9 +115,9 @@ steps:
               - name: PORT
                 value: "8080"
               - name: GOOGLE_CLOUD_PROJECT
-                value: $(terraform output -raw project_id)
+                value: ${PROJECT_ID}
               - name: GOOGLE_CLOUD_LOCATION
-                value: $(terraform output -raw gke_cluster_location)
+                value: ${_ADK_VERTEX_REGION}
               - name: GOOGLE_GENAI_USE_VERTEXAI
                 value: "true"
             readinessProbe:
@@ -142,6 +142,7 @@ steps:
       selector:
         app: adk-agent
     EOF
+
 
     kubectl apply -f ../app/deployment.yaml
     kubectl rollout status deployment/adk-agent
