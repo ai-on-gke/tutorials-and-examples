@@ -146,7 +146,7 @@ steps:
 
     kubectl apply -f ../app/deployment.yaml
     kubectl rollout status deployment/adk-agent
-    kubectl port-forward svc/adk-agent 8080:80
+    kubectl port-forward svc/adk-agent 8080:80 &
     sleep 5
 
     apt update
