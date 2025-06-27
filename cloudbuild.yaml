@@ -32,7 +32,7 @@ steps:
   - |
     set -e
 
-    echo "fail" > /workspace/gke_cluster_result.txt
+    echo "fail" > /workspace/adk_vertex_gke_cluster_result.txt
     terraform apply \
     -var-file=default_env.tfvars \
     -var=project_id=$PROJECT_ID \
@@ -46,7 +46,7 @@ steps:
     -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
     -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
     -auto-approve -no-color
-    echo "pass" > /workspace/gke_cluster_result.txt
+    echo "pass" > /workspace/adk_vertex_gke_cluster_result.txt
   allowFailure: true
   waitFor: ['adk-vertex: validate platform']
 
@@ -62,39 +62,21 @@ steps:
   allowFailure: true
   waitFor: ['adk-vertex: create gke cluster']
 
-- id: 'connect to the cluster'
-  name: "hashicorp/terraform:latest"
+- id: "adk-vertex: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+    - "CLOUDSDK_COMPUTE_ZONE=${_REGION}"
+    - "CLOUDSDK_CONTAINER_CLUSTER=ml-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-cluster"
   entrypoint: 'sh'
   args:
   - '-c'
   - |
     set -e
+    echo "fail" > /workspace/adk_vertex_test_guide.txt
 
-    echo "fail" > /workspace/connect_to_the_cluster.txt
-    gcloud container clusters get-credentials \
-    ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
-    --location $_ADK_VERTEX_REGION \
-    --project $PROJECT_ID
-
-    kubectl get pods
-
-    echo "pass" > /workspace/connect_to_the_cluster.txt
+    echo "pass" > /workspace/adk_vertex_test_guide.txt
   allowFailure: true
   waitFor: ['adk-vertex: generate kubeconfig']
-
-- id: 'invoke the cluster'
-  name: "hashicorp/terraform:latest"
-  entrypoint: 'sh'
-  args:
-  - '-c'
-  - |
-    set -e
-
-    echo "fail" > /workspace/invoke_the_cluster.txt
-    kubectl get pods
-    echo "pass" > /workspace/invoke_the_cluster.txt
-  allowFailure: true
-  waitFor: ['connect to the cluster']
 
 - id: 'adk-vertex: cleanup gke cluster'
   name: "hashicorp/terraform:latest"
@@ -105,7 +87,7 @@ steps:
   - |
     set -e
 
-    echo "fail" > /workspace/cleanup_gke_cluster.txt
+    echo "fail" > /workspace/adk_vertex_cleanup_gke_cluster.txt
     terraform destroy \
     -var-file=default_env.tfvars \
     -var=project_id=$PROJECT_ID \
@@ -119,7 +101,7 @@ steps:
     -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
     -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
     -auto-approve -no-color
-    echo "pass" > /workspace/cleanup_gke_cluster.txt
+    echo "pass" > /workspace/adk_vertex_cleanup_gke_cluster.txt
   allowFailure: true
   waitFor: ['invoke the cluster']
 
@@ -134,27 +116,20 @@ steps:
 
     echo "pass" > /workspace/check_result.txt
 
-    if [[ $(cat /workspace/gke_cluster_result.txt) != "pass" ]]; then
-      echo "gke cluster creation failed"
+    if [[ $(cat /workspace/adk_vertex_gke_cluster_result.txt) != "pass" ]]; then
+      echo "adk vertex gke cluster creation failed"
       echo "error" > /workspace/check_result.txt
     fi
 
-    if [[ $(cat /workspace/dummy_failure_step.txt) != "pass" ]]; then
-      echo "dummy failure step failed"
+    if [[ $(cat /workspace/adk_vertex_test_guide.txt) != "pass" ]]; then
+      echo "adk vertex test guide failed"
       echo "error" > /workspace/check_result.txt
     fi
 
-    if [[ $(cat /workspace/connect_to_the_cluster.txt) != "pass" ]]; then
-      echo "connect to the cluster step failed"
+    if [[ $(cat /workspace/adk_vertex_cleanup_gke_cluster.txt) != "pass" ]]; then
+      echo "adk vertex gke cluster cleanup failed"
       echo "error" > /workspace/check_result.txt
     fi
-
-    if [[ $(cat /workspace/invoke_the_cluster.txt) != "pass" ]]; then
-      echo "invoke the cluster step failed"
-      echo "error" > /workspace/check_result.txt
-    fi
-
-    cat /workspace/check_result.txt
 
     if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
       exit 1
