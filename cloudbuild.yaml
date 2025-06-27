@@ -147,7 +147,7 @@ steps:
     kubectl apply -f ../app/deployment.yaml
     kubectl rollout status deployment/adk-agent
     kubectl port-forward svc/adk-agent 8080:80 &
-    sleep 5
+    sleep 5s
 
     apt update
     apt install python3-venv --assume-yes
