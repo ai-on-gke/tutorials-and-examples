@@ -17,7 +17,7 @@ steps:
   name: "hashicorp/terraform:latest"
   dir: '/workspace/adk/vertex/terraform'
   allowFailure: true
-  waitFor: ['validate platform']
+  waitFor: ['-']
   env:
   - "KUBE_LOAD_CONFIG_FILE=false"
   entrypoint: 'sh'
@@ -46,7 +46,7 @@ steps:
   name: "hashicorp/terraform:latest"
   entrypoint: 'sh'
   allowFailure: true
-  waitFor: ['create gke cluster']
+  waitFor: ['adk-vertex: create gke cluster']
   args:
   - '-c'
   - |
@@ -76,8 +76,9 @@ steps:
     kubectl get pods
     echo "pass" > /workspace/invoke_the_cluster.txt
 
-- id: 'cleanup gke cluster'
+- id: 'adk-vertex: cleanup gke cluster'
   name: "hashicorp/terraform:latest"
+  dir: '/workspace/adk/vertex/terraform'
   allowFailure: true
   waitFor: ['create gke cluster']
   entrypoint: 'sh'
