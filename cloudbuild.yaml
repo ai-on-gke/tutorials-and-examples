@@ -13,22 +13,17 @@
 # limitations under the License.
 
 steps:
-- id: "validate platform"
-  # name: "gcr.io/$PROJECT_ID/terraform"
+- id: "adk-vertex: validate platform"
   name: "hashicorp/terraform:latest"
-  dir: "github.com/ai-on-gke/common-infra/common/infrastructure/"
-  waitFor: ["-"]
+  dir: "/workspace/adk/vertex/terraform"
   script: |
-    set -e
     terraform init -no-color
     terraform validate -no-color
+  waitFor: ["-"]
 
-- id: 'create gke cluster'
-  # name: 'gcr.io/$PROJECT_ID/terraform'
+- id: 'adk-vertex: create gke cluster'
   name: "hashicorp/terraform:latest"
-  dir: 'github.com/ai-on-gke/common-infra/common/infrastructure/'
-  allowFailure: true
-  waitFor: ['validate platform']
+  dir: '/workspace/adk/vertex/terraform'
   env:
   - "KUBE_LOAD_CONFIG_FILE=false"
   entrypoint: 'sh'
@@ -37,104 +32,164 @@ steps:
   - |
     set -e
 
-    echo "fail" > /workspace/gke_cluster_result.txt
+    echo "fail" > /workspace/adk_vertex_gke_cluster_result.txt
     terraform apply \
-    -var-file=tfvars_tests/standard-gke-public.platform.tfvars \
+    -var-file=default_env.tfvars \
     -var=project_id=$PROJECT_ID \
-    -var=network_name=ml-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER  \
-    -var=subnetwork_name=ml-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER  \
-    -var=subnetwork_region=$_REGION \
-    -var=cluster_name=ml-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
-    -var=autopilot_cluster=$_AUTOPILOT_CLUSTER \
-    -var=cluster_location=$_REGION \
-    -var='cpu_pools=[{initial_node_count=2,name="cpu-pool",machine_type="n1-standard-16",autoscaling=true,min_count=1,max_count=3,disk_size_gb=100,disk_type="pd-standard",}]' \
-    -var='gpu_pools=[{initial_node_count=2,name="gpu-pool",machine_type="g2-standard-24",autoscaling=true,min_count=1,max_count=3,disk_size_gb=100,disk_type="pd-balanced",accelerator_count=2,accelerator_type="nvidia-l4",gpu_driver_version="DEFAULT",}]' \
+    -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    -var=cluster_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
+    -var=cluster_location=$_ADK_VERTEX_REGION \
+    -var=network_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    -var=subnetwork_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    -var=subnetwork_region=$_ADK_VERTEX_REGION \
+    -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
+    -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
     -auto-approve -no-color
-    echo "pass" > /workspace/gke_cluster_result.txt
-
-- id: 'dummy step with a failure'
-  name: "hashicorp/terraform:latest"
-  dir: 'github.com/ai-on-gke/common-infra/common/infrastructure'
-  entrypoint: 'sh'
+    echo "pass" > /workspace/adk_vertex_gke_cluster_result.txt
   allowFailure: true
-  waitFor: ['create gke cluster']
+  waitFor: ['adk-vertex: validate platform']
+
+- id: 'adk-vertex: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
   args:
-  - '-c'
-  - |
-    set -e
-
-    echo "fail" > /workspace/dummy_failure_step.txt
-    ls -la ./nodir
-    echo "pass" > /workspace/dummy_failure_step.txt
-
-- id: 'connect to the cluster'
-  name: "hashicorp/terraform:latest"
-  dir: 'github.com/ai-on-gke/common-infra/common/infrastructure'
-  entrypoint: 'sh'
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-adk-vertex-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-cluster'
+  - '--region=${_ADK_VERTEX_REGION}'
+  - '--project=${PROJECT_ID}'
   allowFailure: true
-  waitFor: ['create gke cluster']
-  args:
-  - '-c'
-  - |
-    set -e
+  waitFor: ['adk-vertex: create gke cluster']
 
-    echo "fail" > /workspace/connect_to_the_cluster.txt
-    gcloud container clusters get-credentials \
-    ml-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
-    --location $_REGION \
-    --project $PROJECT_ID
-
-    kubectl get pods
-
-    echo "pass" > /workspace/connect_to_the_cluster.txt
-
-- id: 'invoke the cluster'
-  name: "hashicorp/terraform:latest"
-  dir: 'github.com/ai-on-gke/common-infra/common/infrastructure'
-  entrypoint: 'sh'
-  allowFailure: true
-  waitFor: ['connect to the cluster']
-  args:
-  - '-c'
-  - |
-    set -e
-
-    echo "fail" > /workspace/invoke_the_cluster.txt
-    kubectl get pods
-    echo "pass" > /workspace/invoke_the_cluster.txt
-
-- id: 'cleanup gke cluster'
-  # name: 'gcr.io/$PROJECT_ID/terraform'
-  name: "hashicorp/terraform:latest"
-  dir: 'github.com/ai-on-gke/common-infra/common/infrastructure/'
-  allowFailure: true
-  waitFor: ['create gke cluster', 'dummy step with a failure']
+- id: "adk-vertex: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: '/workspace/adk/vertex/terraform'
+  env:
+    - "CLOUDSDK_COMPUTE_ZONE=${_REGION}"
+    - "CLOUDSDK_CONTAINER_CLUSTER=ml-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-cluster"
   entrypoint: 'sh'
   args:
   - '-c'
   - |
     set -e
+    echo "fail" > /workspace/adk_vertex_test_guide.txt
 
-    echo "fail" > /workspace/cleanup_gke_cluster.txt
+    gcloud builds submit \
+        --tag us-docker.pkg.dev/${PROJECT_ID}/ml-adk-vertex-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-${_AUTOPILOT_CLUSTER}/adk-agent:latest \
+        --project=$PROJECT_ID \
+        ../app
+
+    cat <<  EOF > ../app/deployment.yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: adk-agent
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: adk-agent
+      template:
+        metadata:
+          labels:
+            app: adk-agent
+        spec:
+          serviceAccount: ml-adk-vertex-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-${_AUTOPILOT_CLUSTER}-sa
+          containers:
+          - name: adk-agent
+            imagePullPolicy: Always
+            image: us-docker.pkg.dev/${PROJECT_ID}/ml-adk-vertex-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-${_AUTOPILOT_CLUSTER}/adk-agent:latest
+            resources:
+              limits:
+                memory: "256Mi"
+                cpu: "500m"
+                ephemeral-storage: "128Mi"
+              requests:
+                memory: "256Mi"
+                cpu: "500m"
+                ephemeral-storage: "128Mi"
+            ports:
+            - containerPort: 8080
+            env:
+              - name: PORT
+                value: "8080"
+              - name: GOOGLE_CLOUD_PROJECT
+                value: ${PROJECT_ID}
+              - name: GOOGLE_CLOUD_LOCATION
+                value: ${_ADK_VERTEX_REGION}
+              - name: GOOGLE_GENAI_USE_VERTEXAI
+                value: "true"
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 8080
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 5
+              successThreshold: 1
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: adk-agent
+    spec:
+      type: NodePort
+      ports:
+        - port: 80
+          targetPort: 8080
+      selector:
+        app: adk-agent
+    EOF
+
+
+    kubectl apply -f ../app/deployment.yaml
+    kubectl rollout status deployment/adk-agent
+    kubectl port-forward svc/adk-agent 8080:80 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+    python3 /workspace/ci-resources/adk/vertex/tests/test.py http://127.0.0.1:8080
+
+    echo "pass" > /workspace/adk_vertex_test_guide.txt
+  allowFailure: true
+  waitFor: ['adk-vertex: generate kubeconfig']
+
+- id: 'adk-vertex: cleanup gke cluster'
+  name: "hashicorp/terraform:latest"
+  dir: '/workspace/adk/vertex/terraform'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/adk_vertex_cleanup_gke_cluster.txt
     terraform destroy \
-    -var-file=tfvars_tests/standard-gke-public.platform.tfvars \
+    -var-file=default_env.tfvars \
     -var=project_id=$PROJECT_ID \
-    -var=network_name=ml-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER  \
-    -var=subnetwork_name=ml-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER  \
-    -var=subnetwork_region=$_REGION \
-    -var=cluster_name=ml-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
-    -var=autopilot_cluster=$_AUTOPILOT_CLUSTER \
-    -var=cluster_location=$_REGION \
-    -var='cpu_pools=[{initial_node_count=2,name="cpu-pool",machine_type="n1-standard-16",autoscaling=true,min_count=1,max_count=3,disk_size_gb=100,disk_type="pd-standard",}]' \
-    -var='gpu_pools=[{initial_node_count=2,name="gpu-pool",machine_type="g2-standard-24",autoscaling=true,min_count=1,max_count=3,disk_size_gb=100,disk_type="pd-balanced",accelerator_count=2,accelerator_type="nvidia-l4",gpu_driver_version="DEFAULT",}]' \
+    -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    -var=cluster_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
+    -var=cluster_location=$_ADK_VERTEX_REGION \
+    -var=network_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    -var=subnetwork_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    -var=subnetwork_region=$_ADK_VERTEX_REGION \
+    -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
+    -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
     -auto-approve -no-color
-    echo "pass" > /workspace/cleanup_gke_cluster.txt
+    echo "pass" > /workspace/adk_vertex_cleanup_gke_cluster.txt
+  allowFailure: true
+  waitFor: ['adk-vertex: test guide']
 
 - id: 'check result'
-  # name: 'gcr.io/$PROJECT_ID/terraform'
-  name: "hashicorp/terraform:latest"
-  entrypoint: 'sh'
-  waitFor: ['cleanup gke cluster']
+  name: "ubuntu"
+  entrypoint: 'bash'
+  waitFor: ['adk-vertex: cleanup gke cluster']
   args:
   - '-c'
   - |
@@ -142,34 +197,28 @@ steps:
 
     echo "pass" > /workspace/check_result.txt
 
-    if [[ $(cat /workspace/gke_cluster_result.txt) != "pass" ]]; then
-      echo "gke cluster creation failed"
+    if [[ $(cat /workspace/adk_vertex_gke_cluster_result.txt) != "pass" ]]; then
+      echo "adk vertex gke cluster creation failed"
       echo "error" > /workspace/check_result.txt
     fi
 
-    if [[ $(cat /workspace/dummy_failure_step.txt) != "pass" ]]; then
-      echo "dummy failure step failed"
+    if [[ $(cat /workspace/adk_vertex_test_guide.txt) != "pass" ]]; then
+      echo "adk vertex test guide failed"
       echo "error" > /workspace/check_result.txt
     fi
 
-    if [[ $(cat /workspace/connect_to_the_cluster.txt) != "pass" ]]; then
-      echo "connect to the cluster step failed"
+    if [[ $(cat /workspace/adk_vertex_cleanup_gke_cluster.txt) != "pass" ]]; then
+      echo "adk vertex gke cluster cleanup failed"
       echo "error" > /workspace/check_result.txt
     fi
-
-    if [[ $(cat /workspace/invoke_the_cluster.txt) != "pass" ]]; then
-      echo "invoke the cluster step failed"
-      echo "error" > /workspace/check_result.txt
-    fi
-
-    cat /workspace/check_result.txt
 
     if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
       exit 1
     fi
 
 substitutions:
-  _REGION: us-east4
+  _ADK_VERTEX_REGION: us-central1
   _USER_NAME: github
   _AUTOPILOT_CLUSTER: "false"
   _BUILD_ID: ${BUILD_ID:0:8}
@@ -179,9 +228,3 @@ options:
   substitutionOption: "ALLOW_LOOSE"
   machineType: "E2_HIGHCPU_8"
 timeout: 5400s
-# availableSecrets:
-#   secretManager:
-#   - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-kaggle-username/versions/latest
-#     env: "KAGGLE_USERNAME"
-#   - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-kaggle-key/versions/latest
-#     env: "KAGGLE_KEY"
