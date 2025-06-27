@@ -103,7 +103,7 @@ steps:
     -auto-approve -no-color
     echo "pass" > /workspace/adk_vertex_cleanup_gke_cluster.txt
   allowFailure: true
-  waitFor: ['invoke the cluster']
+  waitFor: ['adk-vertex: test guide']
 
 - id: 'check result'
   name: "hashicorp/terraform:latest"
