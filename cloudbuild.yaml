@@ -13,11 +13,19 @@
 # limitations under the License.
 
 steps:
+- id: "adk-vertex: validate platform"
+  name: "hashicorp/terraform:latest"
+  dir: "/workspace/adk/vertex/terraform"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["-"]
+
 - id: 'adk-vertex: create gke cluster'
   name: "hashicorp/terraform:latest"
   dir: '/workspace/adk/vertex/terraform'
   allowFailure: true
-  waitFor: ['-']
+  waitFor: ['adk-vertex: validate platform']
   env:
   - "KUBE_LOAD_CONFIG_FILE=false"
   entrypoint: 'sh'
