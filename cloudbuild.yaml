@@ -80,7 +80,7 @@ steps:
   name: "hashicorp/terraform:latest"
   dir: '/workspace/adk/vertex/terraform'
   allowFailure: true
-  waitFor: ['create gke cluster']
+  waitFor: ['invoke the cluster']
   entrypoint: 'sh'
   args:
   - '-c'
@@ -106,7 +106,7 @@ steps:
 - id: 'check result'
   name: "hashicorp/terraform:latest"
   entrypoint: 'bash'
-  waitFor: ['cleanup gke cluster']
+  waitFor: ['adk-vertex: cleanup gke cluster']
   args:
   - '-c'
   - |
