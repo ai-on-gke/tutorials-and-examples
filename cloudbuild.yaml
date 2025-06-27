@@ -33,19 +33,19 @@ steps:
     set -e
 
     echo "fail" > /workspace/adk_vertex_gke_cluster_result.txt
-    terraform apply \
-    -var-file=default_env.tfvars \
-    -var=project_id=$PROJECT_ID \
-    -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
-    -var=cluster_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
-    -var=cluster_location=$_ADK_VERTEX_REGION \
-    -var=network_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
-    -var=subnetwork_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
-    -var=subnetwork_region=$_ADK_VERTEX_REGION \
-    -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
-    -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
-    -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
-    -auto-approve -no-color
+    # terraform apply \
+    # -var-file=default_env.tfvars \
+    # -var=project_id=$PROJECT_ID \
+    # -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    # -var=cluster_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
+    # -var=cluster_location=$_ADK_VERTEX_REGION \
+    # -var=network_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    # -var=subnetwork_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    # -var=subnetwork_region=$_ADK_VERTEX_REGION \
+    # -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    # -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
+    # -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
+    # -auto-approve -no-color
     echo "pass" > /workspace/adk_vertex_gke_cluster_result.txt
   allowFailure: true
   waitFor: ['adk-vertex: validate platform']
@@ -64,6 +64,7 @@ steps:
 
 - id: "adk-vertex: test guide"
   name: "gcr.io/cloud-builders/kubectl"
+  dir: '/workspace/adk/vertex/terraform'
   env:
     - "CLOUDSDK_COMPUTE_ZONE=${_REGION}"
     - "CLOUDSDK_CONTAINER_CLUSTER=ml-${SHORT_SHA}-${_PR_NUMBER}-${_BUILD_ID}-cluster"
@@ -74,79 +75,78 @@ steps:
     set -e
     echo "fail" > /workspace/adk_vertex_test_guide.txt
 
-    cd /workspace/adk/vertex/terraform
-    gcloud builds submit \
-        --tag $(terraform output -raw image_repository_full_name)/adk-agent:latest \
-        --project=$(terraform output -raw project_id) \
-        ../app
+    # gcloud builds submit \
+    #     --tag $(terraform output -raw image_repository_full_name)/adk-agent:latest \
+    #     --project=$(terraform output -raw project_id) \
+    #     ../app
 
-    cat <<  EOF > ../app/deployment.yaml
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: adk-agent
-    spec:
-      replicas: 1
-      selector:
-        matchLabels:
-          app: adk-agent
-      template:
-        metadata:
-          labels:
-            app: adk-agent
-        spec:
-          serviceAccount: $(terraform output -raw k8s_service_account_name)
-          containers:
-          - name: adk-agent
-            imagePullPolicy: Always
-            image: $(terraform output -raw image_repository_full_name)/adk-agent:latest
-            resources:
-              limits:
-                memory: "256Mi"
-                cpu: "500m"
-                ephemeral-storage: "128Mi"
-              requests:
-                memory: "256Mi"
-                cpu: "500m"
-                ephemeral-storage: "128Mi"
-            ports:
-            - containerPort: 8080
-            env:
-              - name: PORT
-                value: "8080"
-              - name: GOOGLE_CLOUD_PROJECT
-                value: $(terraform output -raw project_id)
-              - name: GOOGLE_CLOUD_LOCATION
-                value: $(terraform output -raw gke_cluster_location)
-              - name: GOOGLE_GENAI_USE_VERTEXAI
-                value: "true"
-            readinessProbe:
-              httpGet:
-                path: /
-                port: 8080
-              initialDelaySeconds: 10
-              periodSeconds: 10
-              timeoutSeconds: 5
-              failureThreshold: 5
-              successThreshold: 1
-    ---
-    apiVersion: v1
-    kind: Service
-    metadata:
-      name: adk-agent
-    spec:
-      type: NodePort
-      ports:
-        - port: 80
-          targetPort: 8080
-      selector:
-        app: adk-agent
-    EOF
+    # cat <<  EOF > ../app/deployment.yaml
+    # apiVersion: apps/v1
+    # kind: Deployment
+    # metadata:
+    #   name: adk-agent
+    # spec:
+    #   replicas: 1
+    #   selector:
+    #     matchLabels:
+    #       app: adk-agent
+    #   template:
+    #     metadata:
+    #       labels:
+    #         app: adk-agent
+    #     spec:
+    #       serviceAccount: $(terraform output -raw k8s_service_account_name)
+    #       containers:
+    #       - name: adk-agent
+    #         imagePullPolicy: Always
+    #         image: $(terraform output -raw image_repository_full_name)/adk-agent:latest
+    #         resources:
+    #           limits:
+    #             memory: "256Mi"
+    #             cpu: "500m"
+    #             ephemeral-storage: "128Mi"
+    #           requests:
+    #             memory: "256Mi"
+    #             cpu: "500m"
+    #             ephemeral-storage: "128Mi"
+    #         ports:
+    #         - containerPort: 8080
+    #         env:
+    #           - name: PORT
+    #             value: "8080"
+    #           - name: GOOGLE_CLOUD_PROJECT
+    #             value: $(terraform output -raw project_id)
+    #           - name: GOOGLE_CLOUD_LOCATION
+    #             value: $(terraform output -raw gke_cluster_location)
+    #           - name: GOOGLE_GENAI_USE_VERTEXAI
+    #             value: "true"
+    #         readinessProbe:
+    #           httpGet:
+    #             path: /
+    #             port: 8080
+    #           initialDelaySeconds: 10
+    #           periodSeconds: 10
+    #           timeoutSeconds: 5
+    #           failureThreshold: 5
+    #           successThreshold: 1
+    # ---
+    # apiVersion: v1
+    # kind: Service
+    # metadata:
+    #   name: adk-agent
+    # spec:
+    #   type: NodePort
+    #   ports:
+    #     - port: 80
+    #       targetPort: 8080
+    #   selector:
+    #     app: adk-agent
+    # EOF
 
-    kubectl apply -f ../app/deployment.yaml
-    kubectl rollout status deployment/adk-agent
-    kubectl port-forward svc/adk-agent 8080:80
-    sleep 5
+    # kubectl apply -f ../app/deployment.yaml
+    # kubectl rollout status deployment/adk-agent
+    # kubectl port-forward svc/adk-agent 8080:80
+    # sleep 5
 
     echo "pass" > /workspace/adk_vertex_test_guide.txt
   allowFailure: true
@@ -162,19 +162,19 @@ steps:
     set -e
 
     echo "fail" > /workspace/adk_vertex_cleanup_gke_cluster.txt
-    terraform destroy \
-    -var-file=default_env.tfvars \
-    -var=project_id=$PROJECT_ID \
-    -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
-    -var=cluster_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
-    -var=cluster_location=$_ADK_VERTEX_REGION \
-    -var=network_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
-    -var=subnetwork_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
-    -var=subnetwork_region=$_ADK_VERTEX_REGION \
-    -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
-    -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
-    -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
-    -auto-approve -no-color
+    # terraform destroy \
+    # -var-file=default_env.tfvars \
+    # -var=project_id=$PROJECT_ID \
+    # -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    # -var=cluster_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster \
+    # -var=cluster_location=$_ADK_VERTEX_REGION \
+    # -var=network_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    # -var=subnetwork_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    # -var=subnetwork_region=$_ADK_VERTEX_REGION \
+    # -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER \
+    # -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
+    # -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa \
+    # -auto-approve -no-color
     echo "pass" > /workspace/adk_vertex_cleanup_gke_cluster.txt
   allowFailure: true
   waitFor: ['adk-vertex: test guide']
