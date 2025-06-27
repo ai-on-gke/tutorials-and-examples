@@ -38,13 +38,13 @@ steps:
     terraform apply \
     -var-file=default_env.tfvars \
     -var=project_id=$PROJECT_ID \
-    -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-default-name
+    -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER
     -var=cluster_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster
     -var=cluster_location=$_ADK_VERTEX_REGION
     -var=network_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER
     -var=subnetwork_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER
     -var=subnetwork_region=$_ADK_VERTEX_REGION
-    -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-repository
+    -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER
     -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa
     -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa
     -auto-approve -no-color
@@ -99,13 +99,13 @@ steps:
     terraform destroy \
     -var-file=default_env.tfvars \
     -var=project_id=$PROJECT_ID \
-    -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-default-name
+    -var=default_resource_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER
     -var=cluster_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-cluster
     -var=cluster_location=$_ADK_VERTEX_REGION
     -var=network_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER
     -var=subnetwork_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER
     -var=subnetwork_region=$_ADK_VERTEX_REGION
-    -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-repository
+    -var=image_repository_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER
     -var=iam_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa
     -var=k8s_service_account_name=ml-adk-vertex-$SHORT_SHA-$_PR_NUMBER-$_BUILD_ID-$_AUTOPILOT_CLUSTER-sa
     -auto-approve -no-color
