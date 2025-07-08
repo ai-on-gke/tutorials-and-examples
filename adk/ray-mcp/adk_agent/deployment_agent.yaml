@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adk-agent
+  namespace: adk-weather-tutorial
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adk-agent
+  template:
+    metadata:
+      labels:
+        app: adk-agent
+    spec:
+      containers:
+      - name: adk-agent
+        image: us-docker.pkg.dev/<PROJECT_ID>/llama-ray/adk-agent:latest
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 1
+          limits:
+            memory: 1Gi
+            cpu: 2
+        ports:
+        - containerPort: 8080
+        env:
+          - name: PORT
+            value: '8080'
+          - name: GOOGLE_CLOUD_PROJECT
+            value: 'gke-ai-open-models'
+          - name: GOOGLE_CLOUD_LOCATION
+            value: 'us-central1'
+          - name: GOOGLE_GENAI_USE_VERTEXAI
+            value: 'False'
+          - name: WEATHER_MCP_SERVER_HOST
+            value: 'weather-mcp-server'
+          - name: WEATHER_SERVER_PORT
+            value: '8080'
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir:
+          medium: Memory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adk-agent
+  namespace: adk-weather-tutorial
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+  selector:
+    app: adk-agent

@@ -17,6 +17,5 @@ terraform {
     google = {
       source = "hashicorp/google"
     }
-
   }
 }

@@ -1,4 +1,4 @@
-FROM rayproject/ray-ml:2.41.0.deprecated-py39-gpu
+FROM rayproject/ray-ml:nightly-gpu
 WORKDIR /app
 
 COPY requirements.txt .

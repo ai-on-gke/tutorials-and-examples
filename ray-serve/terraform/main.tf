@@ -21,8 +21,17 @@ locals {
   cluster_name = var.cluster_name != "" ? var.cluster_name : var.default_resource_name
 }
 
+# Enable Cloud Resource Manager API
+resource "google_project_service" "cloudresourcemanager" {
+  project = var.project_id
+  service = "cloudresourcemanager.googleapis.com"
+
+  # Prevent disabling the API if it's already enabled
+  disable_on_destroy = false
+}
+
 module "gke_cluster" {
-  source            = "github.com/ai-on-gke/common-infra/common/infrastructure?ref=main"
+  source            = "github.com/ai-on-gke/common-infra//common/infrastructure?ref=main"
   project_id        = var.project_id
   cluster_name      = local.cluster_name
   cluster_location  = var.cluster_location
@@ -35,6 +44,20 @@ module "gke_cluster" {
   subnetwork_cidr   = var.subnetwork_cidr
   ray_addon_enabled = false
   depends_on        = [module.custom_network]
+}
+
+resource "google_storage_bucket_iam_member" "cloudbuild_storage_viewer" {
+  bucket = "${var.project_id}_cloudbuild"
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_artifact_registry_repository_iam_member" "cloudbuild_artifact_writer" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.image_repo.location
+  repository = google_artifact_registry_repository.image_repo.repository_id
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
 }
 
 locals {

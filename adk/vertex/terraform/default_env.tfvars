@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-project_id            = "akvelon-gke-aieco"
+project_id            = "<PROJECT_ID>"
 default_resource_name = "adk-tf"
 
 cluster_name      = "" # Leave empty to use the default name (default_resource_name) 
@@ -25,7 +25,7 @@ subnetwork_name   = "" # Leave empty to use the default name
 subnetwork_region = "us-central1"
 subnetwork_cidr   = "10.128.0.0/20"
 
-kubernetes_namespace     = "default"
+kubernetes_namespace = "default"
 
 image_repository_name = ""
 

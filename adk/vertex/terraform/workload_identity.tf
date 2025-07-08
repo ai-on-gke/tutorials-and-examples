@@ -17,6 +17,14 @@ locals {
   k8s_service_account_name = var.k8s_service_account_name != "" ? var.k8s_service_account_name : var.default_resource_name
 }
 
+resource "google_project_iam_custom_role" "vertexai_custom_role" {
+  project = var.project_id
+  role_id = "tutorialVertexAICustomRole"
+  title   = "VertexAI Tutorial Custom Role"
+  permissions = [
+    "aiplatform.endpoints.predict"
+  ]
+}
 
 module "aiplatform_workload_identity" {
   providers = {
@@ -27,9 +35,9 @@ module "aiplatform_workload_identity" {
   k8s_sa_name                     = local.k8s_service_account_name
   automount_service_account_token = true
   namespace                       = var.kubernetes_namespace
-  roles                           = [
-                                      "roles/aiplatform.user",
-                                    ]
-  project_id                      = var.project_id
-  depends_on                      = [module.gke_cluster]
+  roles = [
+    "projects/${var.project_id}/roles/tutorialVertexAICustomRole",
+  ]
+  project_id = var.project_id
+  depends_on = [module.gke_cluster]
 }

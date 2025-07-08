@@ -31,33 +31,11 @@ variable "cluster_membership_id" {
   default     = ""
 }
 
-# variable "ray_version" {
-#   type    = string
-#   default = "v2.9.3"
-# }
-
 variable "kubernetes_namespace" {
   type        = string
   description = "Kubernetes namespace where resources are deployed"
   default     = "ai-on-gke"
 }
-
-# variable "enable_grafana_on_ray_dashboard" {
-#   type        = bool
-#   description = "Add option to enable or disable grafana for the ray dashboard. Enabling requires anonymous access."
-#   default     = false
-# }
-
-# variable "create_gcs_bucket" {
-#   type        = bool
-#   default     = false
-#   description = "Enable flag to create gcs_bucket"
-# }
-
-# variable "gcs_bucket" {
-#   type        = string
-#   description = "The GCS bucket to store data for the Ray cluster."
-# }
 
 variable "create_service_account" {
   type        = bool
@@ -71,16 +49,17 @@ variable "workload_identity_service_account" {
   default     = "ray-sa"
 }
 
-# variable "create_ray_cluster" {
-#   type        = bool
-#   default     = true
-#   description = "Create a Ray cluster"
-# }
+variable "artifact_registry_name" {
+  type = string
+  description = "Name of Artifact Registry Repository"
+  default = "adk-repo"
+}
 
-# variable "ray_cluster_name" {
-#   type    = string
-#   default = "ray-cluster"
-# }
+variable "artifact_registry_location" {
+  type = string
+  description = "Location of Artifact Registry Repository"
+  default = "us-central1"
+}
 
 variable "enable_gpu" {
   type    = bool
