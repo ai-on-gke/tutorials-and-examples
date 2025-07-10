@@ -1,0 +1,27 @@
+main:
+  config:
+      # n8n:
+      #   encryption_key: "my_secret" # ==> turns into ENV: N8N_ENCRYPTION_KEY=my_secret
+      db:
+        type: postgresdb # ==> turns into ENV: DB_TYPE=postgresdb
+        postgresdb:
+          host: ${DB_HOST} 
+
+      node:
+        function_allow_builtin: "*" # ==> turns into ENV: NODE_FUNCTION_ALLOW_BUILTIN="*"
+  extraEnv:
+      DB_POSTGRESDB_DATABASE:
+        valueFrom:
+          secretKeyRef:
+            name: db-secret
+            key: database
+      DB_POSTGRESDB_PASSWORD:
+        valueFrom:
+          secretKeyRef:
+            name: db-secret
+            key: password
+      DB_POSTGRESDB_USER:
+        valueFrom:
+          secretKeyRef:
+            name: db-secret
+            key: username
