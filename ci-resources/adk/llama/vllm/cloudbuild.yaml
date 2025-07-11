@@ -27,6 +27,7 @@ steps:
   script: |
     terraform init -no-color
     terraform validate -no-color
+
   waitFor: ["adk-llama-vllm: prepare tests"]
 
 - id: 'adk-llama-vllm: create gke cluster'
