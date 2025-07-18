@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-stack
+  namespace: default
+  labels:
+    app: redis-stack
+spec:
+  selector:
+    matchLabels:
+      app: redis-stack
+  template:
+    metadata:
+      labels:
+        app: redis-stack
+    spec:
+      containers:
+      - name: redis-stack
+        image: redis/redis-stack:7.2.0-v17
+        ports:
+        - containerPort: 6379
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 4Gi
+          requests:
+            cpu: 250m
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-stack-service
+spec:
+  selector:
+    app: redis-stack
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
