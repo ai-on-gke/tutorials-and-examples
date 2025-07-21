@@ -19,6 +19,7 @@ steps:
   args:
     - '-c'
     - |
+      echo "THIS IS TEST PULL REQUEST"
       cp -r /workspace/ci-resources/adk/ray-mcp/tests /workspace/adk/ray-mcp/tests
       cp -r /workspace/ci-resources/ray-serve/tests /workspace/ray-serve/tests
 
