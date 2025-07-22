@@ -63,6 +63,7 @@ module "cloudsql" {
       collation = "en_US.UTF8"
     },
   ]
+  depends_on = [module.custom_network]
 }
 
 resource "kubernetes_secret" "secret" {
