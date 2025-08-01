@@ -1,0 +1,212 @@
+# Copyright 2025 Google Inc. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-headless-svc
+spec:
+  clusterIP: None # clusterIP must be None to create a headless service
+  selector:
+    app: torch-inference-job # must match Job name
+  ports:
+  - protocol: TCP
+    port: 29400
+    targetPort: 29400
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: torch-inference-job
+  labels:
+    app: torch-inference-job
+    kueue.x-k8s.io/queue-name: dws-local-queue # Kueue setting 
+spec:
+  parallelism: 2
+  completions: 2
+  suspend: true # Kueue setting 
+  completionMode: Indexed
+  template:
+    metadata:
+      annotations:
+        provreq.kueue.x-k8s.io/maxRunDurationSeconds: "7200" # Kueue setting 
+        gke-gcsfuse/volumes: "true"
+        gke-gcsfuse/cpu-limit: "0"
+        gke-gcsfuse/memory-limit: "0"
+        gke-gcsfuse/ephemeral-storage-limit: "0"
+        networking.gke.io/default-interface: 'eth0'
+        networking.gke.io/interfaces: |
+          [
+            {"interfaceName":"eth0","network":"default"},
+            {"interfaceName":"eth1","network":"gvnic-1"},
+            {"interfaceName":"eth2","network":"rdma-0"},
+            {"interfaceName":"eth3","network":"rdma-1"},
+            {"interfaceName":"eth4","network":"rdma-2"},
+            {"interfaceName":"eth5","network":"rdma-3"},
+            {"interfaceName":"eth6","network":"rdma-4"},
+            {"interfaceName":"eth7","network":"rdma-5"},
+            {"interfaceName":"eth8","network":"rdma-6"},
+            {"interfaceName":"eth9","network":"rdma-7"}
+          ]
+      labels:
+        app: torch-inference-job
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: ultra-nodepool-dws # Required here for Kueue 
+      tolerations: # Required here for Kueue 
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      serviceAccountName: $KSA_NAME 
+      subdomain: inference-headless-svc
+      restartPolicy: OnFailure
+      containers:
+        - name: job
+          image: us-central1-docker.pkg.dev/$PROJECT/torch-images/torch-ultra-job:latest
+          command: [ "torchrun" ]
+          args: [
+            "--nnodes=2", 
+            "--nproc_per_node=8",
+            "--node_rank=$(JOB_COMPLETION_INDEX)",
+            "--rdzv_id=123",
+            "--rdzv_endpoint=torch-inference-job-0.inference-headless-svc:29400",
+            "--rdzv_backend=c10d",
+            "batch_inference.py"
+          ]
+          ports:
+          - containerPort: 29400
+            protocol: TCP
+          env:
+            # Required 
+            - name: LD_LIBRARY_PATH
+              value: /usr/local/nvidia/lib64
+            - name: PROJECT
+              value: "$PROJECT"
+            - name: GSDATABUCKET
+              value: "$GSDATABUCKET"
+            - name: OUTPUT_PATH
+              value: "$OUTPUT_PATH"
+            # --- Hugging face home ---
+            - name: HF_HOME
+              value: "/" 
+            # --- NCCL timeout ---
+            - name: NCCL_TIMEOUT
+              value: "120"
+            # --- Hugging face token ---
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: NCCL_DEBUG # NCCL debug setting
+              value: "ERROR"
+            - name: NCCL_DEBUG_SUBSYS # NCCL debug setting 
+              value: "INIT,NET,ENV,COLL,GRAPH"
+            # NCCL settings found in: /usr/local/gib/scripts/set_nccl_env.sh
+            - name: NCCL_NET
+              value: "gIB"
+            - name: NCCL_CROSS_NIC
+              value: "0"
+            - name: NCCL_NET_GDR_LEVEL
+              value: "PIX"
+            - name: NCCL_P2P_NET_CHUNKSIZE
+              value: "131072"
+            - name: NCCL_P2P_PCI_CHUNKSIZE
+              value: "131072"
+            - name: NCCL_P2P_NVL_CHUNKSIZE
+              value: "524288"
+            - name: NCCL_NVLS_CHUNKSIZE
+              value: "524288"
+            - name: NCCL_IB_GID_INDEX
+              value: "3"
+            - name: NCCL_IB_ADAPTIVE_ROUTING
+              value: "1"
+            - name: NCCL_IB_QPS_PER_CONNECTION
+              value: "4"
+            - name: NCCL_IB_TC
+              value: "52"
+            - name: NCCL_IB_FIFO_TC
+              value: "84"
+            - name: NCCL_TUNER_CONFIG_PATH # NOTE: This is hardcoded based on your last export line
+              value: "/usr/local/gib/configs/tuner_config_a3u.txtpb" # /usr/local/gib/configs/tuner_config_a4.txtpb for a4 
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: library-dir-host
+              mountPath: /usr/local/nvidia
+            - name: gib
+              mountPath: /usr/local/gib
+            - name: training-bucket-vol
+              mountPath: /data
+            - name: shared-memory
+              mountPath: /dev/shm
+          resources:
+            limits:
+              nvidia.com/gpu: 8
+      volumes:
+        - name: library-dir-host
+          hostPath:
+            path: /home/kubernetes/bin/nvidia
+        - name: gib
+          hostPath:
+            path: /home/kubernetes/bin/gib
+        - name: shared-memory
+          emptyDir:
+            medium: "Memory"
+            sizeLimit: 250Gi
+        - name: training-bucket-vol
+          persistentVolumeClaim:
+            claimName: training-bucket-pvc
+---
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: training-bucket-pv
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 768Gi
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: gcsfuse-sc # dummy storage class
+  mountOptions:
+  - implicit-dirs                       # Create implicit directories locally when accessed
+  - metadata-cache:negative-ttl-secs:0  # Disable caching for lookups of files/dirs that don't exist
+  - metadata-cache:ttl-secs:-1          # Keep cached metadata (file attributes, types) indefinitely time-wise
+  - metadata-cache:stat-cache-max-size-mb:-1 # Allow unlimited size for the file attribute (stat) cache
+  - metadata-cache:type-cache-max-size-mb:-1 # Allow unlimited size for the file/directory type cache
+  - file-cache:max-size-mb:-1           # Allow unlimited size for the file content cache
+  - file-cache:cache-file-for-range-read:true # Cache the entire file when any part is read sequentially
+  - file-cache:enable-parallel-downloads:true # Use multiple streams to download file content faster
+  - read_ahead_kb=1024                  # Increase kernel read-ahead buffer
+  - write:enable-streaming-writes:true  # Enable streaming writes
+  csi:
+    driver: gcsfuse.csi.storage.gke.io
+    volumeHandle: $GSBUCKET    # Name of the GCS Bucket to mount
+    volumeAttributes:
+      skipCSIBucketAccessCheck: "true"  # Bypass the CSI Drivers bucket access check
+      gcsfuseMetadataPrefetchOnMount: "true" # Fetch GCS metadata immediately at mount time
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: training-bucket-pvc
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 768Gi
+  storageClassName: gcsfuse-sc # dummy storage class
