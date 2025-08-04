@@ -37,7 +37,7 @@ locals {
 
 module "tls_certificate" {
   count  = local.create_tls_certificate ? 1 : 0
-  source = "/home/artur/projects/ai-on-gke/common-infra/common/modules/managed_tls_certificate"
+  source = "github.com/ai-on-gke/common-infra//common/modules/managed-tls-certificate?ref=main"
 
   project_id       = var.project_id
   location         = var.cluster_location
@@ -52,7 +52,7 @@ module "inference_gateway" {
     kubernetes = kubernetes.cluster
     helm       = helm.cluster
   }
-  source                      = "/home/artur/projects/ai-on-gke/common-infra/common/modules/inference-gateway"
+  source                      = "github.com/ai-on-gke/common-infra//common/modules/inference-gateway?ref=main"
   project_id                  = var.project_id
   cluster_name                = var.cluster_name
   cluster_location            = var.cluster_location

@@ -1,6 +1,6 @@
-project_id       = "akvelon-gke-aieco"
-cluster_name     = "flowise-tf-akamalov"
-cluster_location = "us-central1"
+project_id       = "<PROJECT_ID>"
+cluster_name     = "<CLUSTER_NAME>"
+cluster_location = "<CLUSTER_LOCATION>"
 
 
 # Inference_pool 
