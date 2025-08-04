@@ -1,70 +1,66 @@
 variable "project_id" {
-  type        = string
+  type = string
 }
 
 variable "cluster_name" {
-  type        = string
+  type = string
 }
 
 variable "cluster_location" {
-  type        = string
-}
-
-variable "network_name" {
   type = string
 }
 
 variable "create_proxy_only_subnetwork" {
-  type=bool
+  type    = bool
   default = true
 }
 
 variable "proxy_only_subnetwork_name" {
-  type = string
+  type    = string
   default = "model-armor-tutorial-proxy-only"
 }
 
 variable "kubernetes_namespace" {
-  type = string
+  type    = string
   default = "default"
 }
 
 variable "gateway_name" {
-  type = string
+  type    = string
   default = "model-armor-tutorial-gateway"
 }
 
 variable "create_ip_address" {
-  type = bool
+  type    = bool
   default = true
 }
 
 variable "ip_address_name" {
-  type = string
+  type    = string
   default = "model-armor-tutorial-gateway"
 }
 
 variable "domain" {
-  type = string
+  type    = string
   default = ""
 }
 
 variable "use_tls" {
-  type = bool
+  type    = bool
   default = false
 }
 
 variable "create_tls_certificate" {
-  type = bool
+  type    = bool
   default = false
   validation {
-    condition = var.create_tls_certificate == true && var.domain != "" || var.create_tls_certificate == false
+    condition     = var.create_tls_certificate == true && var.domain != "" || var.create_tls_certificate == false
     error_message = "Domain name is required to create TLS certificate."
   }
 }
 
 variable "tls_certificate_name" {
-  type = string
+  type    = string
   default = "model-armor-tutorial-cert"
 }
 
@@ -84,12 +80,12 @@ variable "inference_pool_target_port" {
 
 variable "inference_models" {
   type = list(object({
-    name = string
-    model_name = string
+    name        = string
+    model_name  = string
     criticality = string
     target_models = optional(
       list(object({
-        name = string
+        name   = string
         weight = number
       })),
       []
@@ -98,12 +94,13 @@ variable "inference_models" {
 }
 
 variable "http_route_name" {
-  type = string
+  type    = string
   default = "model-armor-tutorial-http-route"
 }
 
 variable "http_route_path" {
-  type = string
+  type    = string
+  default = "/"
 }
 
 variable "model_armor_templates" {
@@ -112,7 +109,7 @@ variable "model_armor_templates" {
     rai_settings = optional(
       object({
         rai_filters = list(object({
-          filter_type = string
+          filter_type      = string
           confidence_level = string
         }))
       }),
@@ -152,11 +149,11 @@ variable "model_armor_templates" {
     pi_and_jailbreak_filter_settings = optional(
       object({
         filter_enforcement = string
-        confidence_level = string
+        confidence_level   = string
       }),
       {
         filter_enforcement = "ENABLED"
-        confidence_level = "MEDIUM_AND_ABOVE"
+        confidence_level   = "MEDIUM_AND_ABOVE"
       }
     )
     malicious_uri_filter_settings = optional(
@@ -179,15 +176,15 @@ variable "model_armor_templates" {
 }
 
 variable "gcp_traffic_extension_name" {
-  type = string
+  type    = string
   default = "model-armor-tutorial-gcp-traffic-extension"
 }
 
 variable "gcp_traffic_extension_model_armor_settings" {
   type = list(object({
-    model = string
+    model                        = string
     model_response_template_name = string
-    user_prompt_template_name = string
+    user_prompt_template_name    = string
   }))
 }
 

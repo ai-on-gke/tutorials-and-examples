@@ -17,14 +17,13 @@ locals {
   cluster_ca_certificate = base64decode(data.google_container_cluster.cluster.master_auth[0].cluster_ca_certificate)
 }
 
-
 provider "kubernetes" {
-  alias = "cluster"
+  alias                  = "cluster"
   host                   = local.host
   token                  = data.google_client_config.default.access_token
   cluster_ca_certificate = local.private_cluster ? "" : local.cluster_ca_certificate
   dynamic "exec" {
-    for_each = local.private_cluster == true ? [1]: []
+    for_each = local.private_cluster == true ? [1] : []
     content {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "gke-gcloud-auth-plugin"
@@ -41,6 +40,6 @@ provider "helm" {
     exec = local.private_cluster == true ? {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "gke-gcloud-auth-plugin"
-    }: null
+    } : null
   }
 }
