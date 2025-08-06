@@ -20,6 +20,11 @@ variable "proxy_only_subnetwork_name" {
   default = "model-armor-tutorial-proxy-only"
 }
 
+variable "inference_gateway_crds_version" {
+  type    = string
+  default = "v0.5.1"
+}
+
 variable "kubernetes_namespace" {
   type    = string
   default = "default"

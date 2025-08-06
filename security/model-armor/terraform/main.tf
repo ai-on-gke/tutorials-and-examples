@@ -57,6 +57,7 @@ module "inference_gateway" {
   cluster_name                = var.cluster_name
   cluster_location            = var.cluster_location
   kubernetes_namespace        = var.kubernetes_namespace
+  crds_version                = var.inference_gateway_crds_version
   gateway_name                = var.gateway_name
   inference_pool_name         = var.inference_pool_name
   inference_pool_match_labels = var.inference_pool_match_labels
