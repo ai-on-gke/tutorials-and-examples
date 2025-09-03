@@ -20,24 +20,27 @@ spec:
           limits:
             memory: "2048Mi"
             cpu: "1000m"
-            ephemeral-storage: "2048Mi"
+            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
           requests:
             memory: "2048Mi"
             cpu: "1000m"
-            ephemeral-storage: "2048Mi"
+            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
         ports:
         - containerPort: 8080
         env:
           - name: PORT
             value: "8080"
-          - name: LLAMA_GUARD_BASE_URL
-            value: http://vllm-llama-guard-3-service:8000/v1
-          - name: LLAMA_GUARD_MODEL_NAME
-            value: "meta-llama/Llama-Guard-3-8B"
           - name: LLM_BASE_URL
             value: http://vllm-llama3-service:8000/v1
           - name: MODEL_NAME
             value: "meta-llama/Llama-3.1-8B-Instruct"
+          - name: HF_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-token-secret
+                key: token
         readinessProbe:
           httpGet:
             path: /dev-ui/
@@ -47,6 +50,8 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 5
           successThreshold: 1
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
 ---
 apiVersion: v1
 kind: Service

@@ -7,15 +7,22 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models import LlmResponse, LlmRequest
 from typing import Optional, Dict, List, Tuple
 
-from . import llama_guard
 
-LLAMA_GUARD_BASE_URL=os.getenv("LLAMA_GUARD_BASE_URL")
+from llamafirewall import LlamaFirewall, UserMessage, AssistantMessage, Role, ScannerType, Trace, ScanDecision
 
-LLAMA_GUARD_MODEL_NAME = os.getenv("LLAMA_GUARD_MODEL_NAME")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434")
 
-LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+MODEL_NAME = os.getenv("MODEL_NAME", "llama3.2:1b")
 
-MODEL_NAME = os.getenv("MODEL_NAME")
+
+# Initialize LlamaFirewall with AlignmentCheckScanner
+firewall = LlamaFirewall(
+    # Role.ASSISTANT: [ScannerType.AGENT_ALIGNMENT],
+    scanners={
+            Role.USER: [ScannerType.PROMPT_GUARD],
+            Role.ASSISTANT: [ScannerType.PROMPT_GUARD],
+        }
+)
 
 def my_before_model_logic(
     callback_context: CallbackContext, llm_request: LlmRequest) -> Optional[LlmResponse]:
@@ -46,6 +53,7 @@ def my_after_model_logic(
         },
 
     ]
+    print("after")
     return _verify_messages_with_llama_guard(
         messages=messages,
         role = messages[-1]["role"],
@@ -63,14 +71,21 @@ secured_agent = LlmAgent(
 )
 
 
-def _verify_messages_with_llama_guard(messages: List[Dict], role: str) -> Optional[LlmResponse]:
-    safe, categories = llama_guard.verify_messages(
-        messages=messages,
-        role = role,
-        base_url=LLAMA_GUARD_BASE_URL,
-        model=LLAMA_GUARD_MODEL_NAME,
-    )
-    if not safe:
+async def _verify_messages_with_llama_guard(messages: List[Dict], role: str) -> Optional[LlmResponse]:
+
+    conversation_trace = []
+    for msg in messages: 
+        role_cls = UserMessage if msg["role"] == "user" else AssistantMessage
+        conversation_trace.append(
+            role_cls(content=msg["content"])
+        )
+
+    print(conversation_trace)
+    result = await firewall.scan_replay_async(conversation_trace)
+    print(result)
+
+
+    if result.decision == ScanDecision.BLOCK:
         return LlmResponse(
             content=genai_types.Content(
                 role="model",
@@ -79,4 +94,4 @@ def _verify_messages_with_llama_guard(messages: List[Dict], role: str) -> Option
         )
     return None
 
-root_agent = llama_agent
+root_agent = secured_agent

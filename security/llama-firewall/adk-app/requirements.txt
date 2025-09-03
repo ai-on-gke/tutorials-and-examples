@@ -1,0 +1,4 @@
+google_adk==1.12.0
+litellm==1.76.0
+llamafirewall==1.0.3
+huggingface_hub==0.34.4

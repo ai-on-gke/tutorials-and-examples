@@ -1,4 +1,4 @@
-project_id       = "<PROJECT_ID>"
+project_id       = "akvelon-gke-aieco"
 cluster_name = "llama-guard-tutorial-tf"
 cluster_location = "us-central1"
 
