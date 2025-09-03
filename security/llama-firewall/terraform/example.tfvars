@@ -1,5 +1,5 @@
-project_id       = "akvelon-gke-aieco"
-cluster_name = "llama-guard-tutorial-tf"
+project_id       = "<PROJECT_ID>"
+cluster_name = "llama-firewall-tutorial-tf"
 cluster_location = "us-central1"
 
 autopilot_cluster = true

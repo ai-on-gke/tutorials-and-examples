@@ -36,7 +36,7 @@ locals {
   image_repository_full_name = "${var.image_repository_location}-docker.pkg.dev/${var.project_id}/${var.image_repository_name}"
 }
 
-resource "local_file" "vllm_llama_guard_manifest" {
+resource "local_file" "agent_manifest" {
   content = templatefile(
     "${path.module}/templates/secured-agent.yaml.tftpl",
     {

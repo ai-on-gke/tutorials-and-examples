@@ -34,7 +34,7 @@ def my_before_model_logic(
         }
     ]
 
-    return _verify_messages_with_llama_guard(
+    return _verify_messages_with_llama_firewall(
         messages=messages,
         role = messages[-1]["role"],
     )
@@ -54,7 +54,7 @@ def my_after_model_logic(
 
     ]
     print("after")
-    return _verify_messages_with_llama_guard(
+    return _verify_messages_with_llama_firewall(
         messages=messages,
         role = messages[-1]["role"],
     )
@@ -71,7 +71,7 @@ secured_agent = LlmAgent(
 )
 
 
-async def _verify_messages_with_llama_guard(messages: List[Dict], role: str) -> Optional[LlmResponse]:
+async def _verify_messages_with_llama_firewall(messages: List[Dict], role: str) -> Optional[LlmResponse]:
 
     conversation_trace = []
     for msg in messages: 

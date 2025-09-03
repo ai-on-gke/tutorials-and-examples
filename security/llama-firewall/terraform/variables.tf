@@ -4,7 +4,7 @@ variable "project_id" {
 
 variable "cluster_name" {
   type = string
-  default = "llama-guard-tutorial-tf"
+  default = "llama-firewall-tutorial-tf"
 }
 
 variable "cluster_location" {
@@ -26,11 +26,11 @@ variable "cluster_membership_id" {
 }
 variable "network_name" {
   type = string
-  default = "llama-guard-tutorial-tf"
+  default = "llama-firewall-tutorial-tf"
 }
 variable "subnetwork_name" {
   type = string
-  default = "llama-guard-tutorial-tf"
+  default = "llama-firewall-tutorial-tf"
 }
 variable "subnetwork_cidr" {
   type = string
@@ -58,7 +58,7 @@ variable "kubernetes_namespace" {
 variable "image_repository_name" {
   type = string
   description = "Name of Artifact Registry Repository"
-  default = "llama-guard-tutorial-tf"
+  default = "llama-firewall-tutorial-tf"
 }
 
 variable "image_repository_location" {
