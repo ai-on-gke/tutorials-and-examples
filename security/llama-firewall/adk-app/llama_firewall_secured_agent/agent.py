@@ -5,7 +5,7 @@ import os
 
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models import LlmResponse, LlmRequest
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 
 
 from llamafirewall import LlamaFirewall, UserMessage, AssistantMessage, Role, ScannerType, Trace, ScanDecision
@@ -17,9 +17,13 @@ MODEL_NAME = os.getenv("MODEL_NAME", "llama3.2:1b")
 
 # Initialize LlamaFirewall with AlignmentCheckScanner
 firewall = LlamaFirewall(
-    # Role.ASSISTANT: [ScannerType.AGENT_ALIGNMENT],
     scanners={
-            Role.USER: [ScannerType.PROMPT_GUARD],
+            Role.USER: [
+                ScannerType.PROMPT_GUARD,
+                ScannerType.CODE_SHIELD,
+                ScannerType.HIDDEN_ASCII,
+                ScannerType.REGEX,
+            ],
             Role.ASSISTANT: [ScannerType.PROMPT_GUARD],
         }
 )
