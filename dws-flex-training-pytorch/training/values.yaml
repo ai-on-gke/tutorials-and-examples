@@ -38,14 +38,13 @@ fuse:
 training_params:
   # --- Distributed torch job settings ---
   # Models tested with: 
-  # meta-llama/Llama-3.1-70B
-  # meta-llama/Llama-3.1-70B
-  # meta-llama/Llama-3.1-70B
+  # meta-llama/Llama-3.1-8B-Instruct
+  # meta-llama/Llama-3.1-70B-Instruct
 
   # google/gemma-3-27b-it
   # google/gemma-3-4b-it
 
-  model_id: "meta-llama/Llama-3.1-70B"
+  model_id: "meta-llama/Llama-3.1-70B-Instruct"
   dataset_id: "philschmid/gretel-synthetic-text-to-sql"
   dataloader_num_workers: "12"
   output_dir: "/data/llama3.1-70b-sql"
