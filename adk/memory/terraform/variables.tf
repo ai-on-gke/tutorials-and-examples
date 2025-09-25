@@ -17,7 +17,7 @@ variable "project_id" {
 }
 
 variable "cluster_name" {
-  type = string
+  type    = string
   default = "adk-agent-memory-tutorial-tf"
 }
 
@@ -26,11 +26,11 @@ variable "cluster_location" {
 }
 
 variable "autopilot_cluster" {
-  type = bool
+  type    = bool
   default = true
 }
 variable "private_cluster" {
-  type = bool
+  type    = bool
   default = false
 }
 variable "cluster_membership_id" {
@@ -39,11 +39,11 @@ variable "cluster_membership_id" {
   default     = ""
 }
 variable "network_name" {
-  type = string
+  type    = string
   default = "adk-agent-memory-tutorial-tf"
 }
 variable "subnetwork_name" {
-  type = string
+  type    = string
   default = "adk-agent-memory-tutorial-tf"
 }
 variable "subnetwork_cidr" {
@@ -70,38 +70,38 @@ variable "kubernetes_namespace" {
 }
 
 variable "image_repository_name" {
-  type = string
+  type        = string
   description = "Name of Artifact Registry Repository"
-  default = "adk-agent-memory-tutorial-tf"
+  default     = "adk-agent-memory-tutorial-tf"
 }
 
 variable "image_repository_location" {
-  type = string
+  type        = string
   description = "Location of Artifact Registry Repository"
-  default = "us-central1"
+  default     = "us-central1"
 }
 
 variable "cloudsql_instance_name" {
-  type = string
+  type    = string
   default = "adk-agent-memory-tutorial-tf"
 }
 
 variable "cloudsql_instance_region" {
-  type = string
+  type    = string
   default = "us-central1"
 }
 
 variable "cloudsql_adk_database_name" {
-  type = string
+  type    = string
   default = "adk"
 }
 
 variable "cloudsql_agent_memory_database_name" {
-  type = string
+  type    = string
   default = "agent-memory"
 }
 variable "cloudsql_database_user" {
-  type = string
+  type    = string
   default = "postgres"
 }
 

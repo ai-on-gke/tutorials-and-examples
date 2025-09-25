@@ -67,7 +67,7 @@ module "cloudsql" {
 
 resource "kubernetes_secret" "db_secret" {
   provider = kubernetes.cluster
-  for_each = {adk = var.cloudsql_adk_database_name, memory = var.cloudsql_agent_memory_database_name}
+  for_each = { adk = var.cloudsql_adk_database_name, memory = var.cloudsql_agent_memory_database_name }
   metadata {
     name      = "${each.key}-db-secret"
     namespace = var.kubernetes_namespace

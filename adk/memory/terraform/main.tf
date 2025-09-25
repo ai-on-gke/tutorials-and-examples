@@ -56,7 +56,7 @@ provider "kubernetes" {
 }
 
 resource "google_artifact_registry_repository" "image_repo" {
-  project = var.project_id
+  project       = var.project_id
   location      = var.image_repository_location
   repository_id = var.image_repository_name
   format        = "DOCKER"
@@ -81,13 +81,13 @@ resource "local_file" "agent_manifest" {
   content = templatefile(
     "${path.module}/templates/agent-with-memory.yaml.tftpl",
     {
-      IMAGE_NAME = local.image_repository_full_name
+      IMAGE_NAME      = local.image_repository_full_name
       SESSION_DB_HOST = module.cloudsql.instance_ip_address[0].ip_address
       SESSION_DB_NAME = var.cloudsql_adk_database_name
       SESSION_DB_USER = var.cloudsql_database_user
-      VECTOR_DB_HOST = module.cloudsql.instance_ip_address[0].ip_address
-      VECTOR_DB_NAME = var.cloudsql_agent_memory_database_name
-      VECTOR_DB_USER = var.cloudsql_database_user
+      VECTOR_DB_HOST  = module.cloudsql.instance_ip_address[0].ip_address
+      VECTOR_DB_NAME  = var.cloudsql_agent_memory_database_name
+      VECTOR_DB_USER  = var.cloudsql_database_user
     }
   )
   filename = "${path.module}/../gen/agent-with-memory.yaml"
