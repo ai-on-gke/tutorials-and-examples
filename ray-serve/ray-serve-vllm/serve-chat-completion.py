@@ -152,7 +152,6 @@ def build_app() -> serve.Application:
     # Read configuration from environment variables
     config = {
         "model": os.environ.get('MODEL_ID', "meta-llama/Llama-3.1-8B-Instruct"),
-        "tensor-parallel-size": os.environ.get('TENSOR_PARALLELISM', "2"),
         "max-model-len": os.environ.get("MAX_MODEL_LEN", "4096"),
     }
     parsed_args = parse_vllm_args(config)

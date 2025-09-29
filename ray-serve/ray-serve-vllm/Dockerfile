@@ -1,8 +1,5 @@
-FROM rayproject/ray-ml:nightly.250616.74d958-gpu
+FROM rayproject/ray-llm:2.46.0-py311-cu124
 WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 USER root
 

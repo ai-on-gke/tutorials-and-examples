@@ -11,8 +11,7 @@ spec:
       runtime_env:
         env_vars:
           MODEL_ID: "meta-llama/Llama-3.1-8B-Instruct"
-          TENSOR_PARALLELISM: "2"
-          MAX_MODEL_LEN: "32768"
+          MAX_MODEL_LEN: "16384"
           CHAT_TEMPLATE_PATH: "/templates/tool_chat_template_llama3.1_json.jinja"
           VLLM_ENABLE_AUTO_TOOL_CHOICE: "true"
           TOOL_PARSER_NAME: "llama3_json"
@@ -21,7 +20,7 @@ spec:
         num_replicas: 1
         ray_actor_options:
           num_cpus: 2
-          # num_gpus
+          num_gpus: 1
   rayClusterConfig:
     rayVersion: 'nightly-gpu'
     headGroupSpec:
@@ -120,12 +119,12 @@ spec:
                 resources:
                   limits:
                     cpu: "8"
-                    memory: "25Gi"
-                    nvidia.com/gpu: "2"
+                    memory: "16Gi"
+                    nvidia.com/gpu: "1"
                   requests:
                     cpu: "8"
-                    memory: "25Gi"
-                    nvidia.com/gpu: "2"
+                    memory: "16Gi"
+                    nvidia.com/gpu: "1"
                 volumeMounts:
                 - mountPath: /dev/shm
                   name: dshm
