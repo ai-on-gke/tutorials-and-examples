@@ -19,7 +19,7 @@ data "google_project" "project" {
 }
 
 module "gke_cluster" {
-  source            = "github.com/ai-on-gke/common-infra/common/infrastructure?ref=main"
+  source            = "git::https://github.com/ai-on-gke/common-infra//common/infrastructure?ref=main"
   project_id        = var.project_id
   cluster_name      = var.cluster_name
   cluster_location  = var.cluster_location

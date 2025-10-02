@@ -18,7 +18,7 @@
 #}
 
 module "custom_network" {
-  source       = "github.com/ai-on-gke/common-infra/common/modules/gcp-network"
+  source       = "git::https://github.com/ai-on-gke/common-infra//common/modules/gcp-network"
   project_id   = var.project_id
   network_name = var.network_name
   create_psa   = true
