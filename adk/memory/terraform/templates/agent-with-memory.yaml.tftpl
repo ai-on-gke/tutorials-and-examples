@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adk-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adk-agent
+  template:
+    metadata:
+      labels:
+        app: adk-agent
+    spec:
+      containers:
+      - name: adk-agent
+        imagePullPolicy: Always
+        image: ${IMAGE_NAME}/agent-with-memory:latest
+        resources:
+          limits:
+            memory: "2048Mi"
+            cpu: "1000m"
+            ephemeral-storage: "10Gi"
+          requests:
+            memory: "2048Mi"
+            cpu: "1000m"
+            ephemeral-storage: "10Gi"
+        ports:
+        - containerPort: 8080
+        env:
+          - name: PORT
+            value: "8080"
+          - name: SESSION_DB_HOST
+            value: "${SESSION_DB_HOST}"
+          - name: SESSION_DB_NAME
+            value: "${SESSION_DB_NAME}"
+          - name: SESSION_DB_USER
+            value: "${SESSION_DB_USER}"
+          - name: SESSION_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: adk-db-secret
+                key: password
+          - name: VECTOR_DB_HOST
+            value: "${VECTOR_DB_HOST}"
+          - name: VECTOR_DB_NAME
+            value: "${VECTOR_DB_NAME}"
+          - name: VECTOR_DB_USER
+            value: "${VECTOR_DB_USER}"
+          - name: VECTOR_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: memory-db-secret
+                key: password
+          - name: GOOGLE_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: google-api-secret
+                key: key
+        readinessProbe:
+          httpGet:
+            path: /dev-ui/
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 5
+          successThreshold: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adk-agent
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: 8080
+  selector:
+    app: adk-agent
