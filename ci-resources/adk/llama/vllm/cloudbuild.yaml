@@ -76,6 +76,46 @@ steps:
   allowFailure: true
   waitFor: ['adk-llama-vllm: create gke cluster']
 
+- id: 'adk-llama-vllm: allocate L4 GPU'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/adk_llama_vllm_allocate_l4_gpu_result.txt
+
+    cat <<EOF > /workspace/gpu-l4-allocation.yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: my-gpu-pod
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-accelerator: "nvidia-l4"
+      containers:
+      - name: my-gpu-container
+        image: nvidia/cuda:11.0.3-runtime-ubuntu20.04
+        command: ["/bin/bash", "-c", "--"]
+        args: ["while true; do sleep 600; done;"]
+        resources:
+          requests:
+            cpu: "2"
+            memory: "10Gi"
+            nvidia.com/gpu: "1"
+    EOF
+    cat /workspace/gpu-l4-allocation.yaml
+
+    kubectl apply -f /workspace/gpu-l4-allocation.yaml
+    kubectl wait --for=condition=Ready pod/my-gpu-pod --timeout=1200s
+
+    echo "pass" > /workspace/adk_llama_vllm_allocate_l4_gpu_result.txt
+  allowFailure: true
+  waitFor: ['adk-llama-vllm: generate kubeconfig']
+
 - id: "adk-llama-vllm: test guide"
   name: "gcr.io/cloud-builders/kubectl"
   dir: "/workspace/adk/llama/vllm"
@@ -95,6 +135,7 @@ steps:
         --dry-run=client -o yaml | kubectl apply -f -
 
     cd deploy-llm
+    kubectl delete -f /workspace/gpu-l4-allocation.yaml
     kubectl apply -f deploy-llm.yaml
     kubectl rollout status deployment/vllm-llama3-deployment
 
@@ -140,7 +181,7 @@ steps:
 
     echo "pass" > /workspace/adk_llama_vllm_test_guide.txt
   allowFailure: true
-  waitFor: ['adk-llama-vllm: generate kubeconfig', 'adk-llama-vllm: build adk-agent']
+  waitFor: ['adk-llama-vllm: allocate L4 GPU', 'adk-llama-vllm: build adk-agent']
 
 - id: 'adk-llama-vllm: cleanup gke cluster'
   name: "gcr.io/${PROJECT_ID}/terraform"
@@ -163,10 +204,66 @@ steps:
   allowFailure: true
   waitFor: ['adk-llama-vllm: test guide']
 
-- id: 'check result'
+- id: 'adk-llama-vllm: create github issue'
+  name: 'gcr.io/cloud-builders/curl'
+  secretEnv: ["GITHUB_TOKEN"]
+  entrypoint: '/bin/bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq --assume-yes
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" || "$(cat /workspace/adk_llama_vllm_allocate_l4_gpu_result.txt)" != "pass" ]]; then
+      exit 0
+    fi
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $$GITHUB_TOKEN" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "adk-llama-vllm") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    # Read the results from each step's log file
+    if [[ $(cat /workspace/adk_llama_vllm_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* adk llama vllm gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/adk_llama_vllm_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* adk llama vllm test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/adk_llama_vllm_cleanup_gke_cluster.txt) != "pass" ]]; then
+      failed_steps+="* adk llama vllm gke cluster cleanup failed\n"
+    fi
+
+    # If there are any failed steps, create a GitHub Issue
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="ADK Llama vLLM CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "adk-llama-vllm", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $$GITHUB_TOKEN" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['adk-llama-vllm: cleanup gke cluster']
+
+- id: 'adk-llama-vllm: check result'
   name: "ubuntu"
   entrypoint: 'bash'
-  waitFor: ['adk-llama-vllm: cleanup gke cluster']
   args:
   - '-c'
   - |
@@ -193,6 +290,7 @@ steps:
       cat /workspace/check_result.txt
       exit 1
     fi
+  waitFor: ['adk-llama-vllm: create github issue']
 
 substitutions:
   _ADK_LLAMA_VLLM_REGION: us-east4
@@ -208,3 +306,5 @@ availableSecrets:
   secretManager:
   - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
     env: "HF_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/dmitriy-drogovoz-us-ci-gcp/versions/latest
+    env: "GITHUB_TOKEN"
