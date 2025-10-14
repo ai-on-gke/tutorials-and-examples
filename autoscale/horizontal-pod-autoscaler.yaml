@@ -1,0 +1,46 @@
+# ---
+# Horizontal Pod Autoscaler for vLLM Server Metrics
+#
+# This HorizontalPodAutoscaler (HPA) automatically scales the vLLM
+# inference server deployment based on the number of concurrent requests
+# it is processing. It uses a custom metric from the vLLM server itself.
+# ---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gemma-server-hpa
+spec:
+  # scaleTargetRef points the HPA to the deployment it needs to scale.
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm-gemma-deployment # The name of the vLLM deployment
+  # minReplicas and maxReplicas define the boundaries for scaling.
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Pods # This metric is calculated on a per-pod basis.
+    pods:
+      metric:
+        # This is the full name of the custom metric as exposed by the
+        # Stackdriver adapter.
+        # Format: prometheus.googleapis.com|<METRIC_NAME>|<METRIC_KIND>
+        name: prometheus.googleapis.com|vllm:num_requests_running|gauge
+      target:
+        type: AverageValue
+        # The HPA will trigger a scale-up event if the average number of
+        # running requests per pod exceeds this value.
+        averageValue: 4
+  behavior:
+    # The scaleDown behavior helps prevent "flapping" (rapidly scaling up and down).
+    scaleDown:
+      # stabilizationWindowSeconds tells the HPA to wait for this duration
+      # after a scale-down event before considering another one. This gives
+      # the system time to stabilize.
+      stabilizationWindowSeconds: 30
+      policies:
+      - type: Percent
+        # This policy allows the HPA to scale down by 100% of the current
+        # replica count in a single step, if necessary.
+        value: 100
+        periodSeconds: 15

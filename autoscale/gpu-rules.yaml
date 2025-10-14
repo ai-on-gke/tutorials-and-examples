@@ -1,0 +1,25 @@
+# ---
+# Prometheus Rules for NVIDIA GPU Metrics
+#
+# This Rules resource defines a Prometheus recording rule. Recording
+# rules allow you to precompute frequently needed or computationally
+# expensive expressions and save their result as a new set of time series.
+#
+# This rule creates a lowercase version of the `DCGM_FI_DEV_GPU_UTIL`
+# metric to ensure compatibility with the HPA.
+# ---
+apiVersion: monitoring.googleapis.com/v1
+kind: Rules
+metadata:
+  name: nvidia-dcgm-hpa-rules
+  namespace: default
+spec:
+  groups:
+  - name: dcgm.rules
+    interval: 15s # The interval at which the rule is evaluated.
+    rules:
+    # This is the definition of the new time series to create.
+    - record: dcgm_fi_dev_gpu_util # The name of the NEW, lowercase metric.
+      # The expression that generates the value for the new metric.
+      # In this case, it simply copies the value from the original uppercase metric.
+      expr: DCGM_FI_DEV_GPU_UTIL
