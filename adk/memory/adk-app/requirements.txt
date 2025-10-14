@@ -1,0 +1,4 @@
+google_adk==1.16.0
+mem0ai==0.1.117
+psycopg2-binary==2.9.10
+
