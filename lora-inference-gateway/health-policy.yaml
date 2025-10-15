@@ -1,0 +1,22 @@
+# This file defines the HealthCheckPolicy resource, which is a custom resource that allows
+# for configuring the health checks for the backend services. In this case, we are defining
+# a health check for the llm-service.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: vllm-gemma-healthcheck-policy
+  namespace: default # Or the namespace where your vLLM Service is
+spec:
+  targetRef:
+    # The targetRef field specifies the Service that this policy applies to.
+    group: "" # Core API group for Service
+    kind: Service
+    name: ll-service
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        # The requestPath is the path that the health check will send a request to.
+        requestPath: /v1/models # The health endpoint you confirmed earlier
+        # The port is the port that the health check will send a request to.
+        port: 8000 # The targetPort your vLLM app listens on

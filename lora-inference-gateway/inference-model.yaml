@@ -1,0 +1,30 @@
+# This file defines the InferenceModel resources, which are custom resources that represent
+# the models that are being served. It specifies the model name, the criticality of the model,
+# and the InferencePool that the model is associated with.
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceModel
+metadata:
+  # The name of the InferenceModel.
+  name: food-review
+spec:
+  # The modelName is the name of the model that is being served. This is the name that is used
+  # in the inference request to specify which model to use.
+  modelName: sql-chat
+  criticality: Standard
+  # The poolRef is a reference to the InferencePool that this model is associated with.
+  poolRef:
+    name: inference-pool-vllm
+  targetModels:
+  - name: sql-chat
+    weight: 100
+
+---
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceModel
+metadata:
+  name: base-gemma-model
+spec:
+  modelName: google/gemma-3-1b-it
+  criticality: Critical
+  poolRef:
+    name: inference-pool-vllm

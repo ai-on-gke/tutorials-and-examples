@@ -1,0 +1,20 @@
+# This file defines the Gateway resource, which is the entry point for traffic into the mesh.
+# It specifies the gateway's name, the class of gateway to use, and the listeners that define
+# the ports and protocols the gateway will listen on.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  # The name of the gateway. This is used to reference the gateway in other resources, such as HTTPRoutes.
+  name: ai-inf-gateway
+  annotations:
+    networking.gke.io/internal-address-access-mode: global
+spec:
+  # The gatewayClassName specifies the type of gateway to provision. gke-l7-regional-external-managed
+  # provisions a regional external load balancer.
+  gatewayClassName: gke-l7-regional-external-managed
+  # gatewayClassName: gke-l7-rilb
+  listeners:
+    # The listeners specify the ports and protocols the gateway will listen on.
+    - protocol: HTTP # Or HTTPS for production
+      port: 80 # Or 443 for HTTPS
+      name: http

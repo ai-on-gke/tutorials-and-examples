@@ -1,0 +1,17 @@
+# This file defines the GCPGatewayPolicy resource, which is a custom resource that allows
+# for configuring the Gateway's access control. In this case, we are allowing global access
+# to the gateway.
+apiVersion: networking.gke.io/v1
+kind: GCPGatewayPolicy
+metadata:
+  name: ai-inf-gateway-policy
+  namespace: default
+spec:
+  default:
+    # The allowGlobalAccess field allows traffic from any IP address to access the gateway.
+    allowGlobalAccess: true
+  targetRef:
+    # The targetRef field specifies the Gateway that this policy applies to.
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: ai-inf-gateway
