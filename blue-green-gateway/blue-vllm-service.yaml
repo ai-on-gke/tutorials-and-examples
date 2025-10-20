@@ -1,0 +1,16 @@
+# This Service provides a stable internal endpoint for the "blue" VLLM deployment.
+# The Gateway targets this Service to route traffic to the blue pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: blue-llm-service
+spec:
+  # selector links the Service to pods with the 'app: blue-gemma-server' label.
+  selector:
+    app: blue-gemma-server
+  # type: ClusterIP exposes the service internally within the cluster.
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      port: 8085
+      targetPort: 8085

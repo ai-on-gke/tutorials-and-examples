@@ -1,0 +1,16 @@
+# This Service provides a stable internal endpoint for the "green" VLLM deployment.
+# The Gateway targets this Service to route traffic to the green pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: green-llm-service
+spec:
+  # selector links the Service to pods with the 'app: green-gemma-server' label.
+  selector:
+    app: green-gemma-server
+  # type: ClusterIP exposes the service internally within the cluster.
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      port: 8086
+      targetPort: 8086
