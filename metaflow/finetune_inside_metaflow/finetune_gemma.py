@@ -45,8 +45,8 @@ class FinetuneFlow(FlowSpec):
         # secret to huggingfase that has to be added as a Kubernetes secret
         secrets=["hf-token"],
         # specify required GPU settings
-        gpu=1,
-        node_selector={"cloud.google.com/gke-accelerator": "nvidia-tesla-a100"},
+        gpu=2,
+        node_selector={"cloud.google.com/gke-accelerator": "nvidia-l4"},
         persistent_volume_claims={
             "hf-cache-pvc": "/tmp/hf-cache",
         },
