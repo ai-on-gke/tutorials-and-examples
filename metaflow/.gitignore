@@ -2,6 +2,7 @@
 .metaflow/
 metaflow.*.*/
 finetune_inside_metaflow/.metaflow/
+finetune_inside_metaflow/__pycache__/
 finetune_inside_metaflow/metaflow.*.*/
 finetune_flow_config.json
 gen

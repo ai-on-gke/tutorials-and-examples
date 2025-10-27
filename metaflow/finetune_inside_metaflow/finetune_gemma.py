@@ -31,6 +31,7 @@ class FinetuneFlow(FlowSpec):
             "DATASET_LIMIT": "1000",
             "MAX_SEQ_LENGTH": "512",
             "LOGGING_STEPS": "5",
+            "HF_HUB_CACHE": "/tmp/hf-cache",
         }
     )
 
@@ -39,19 +40,22 @@ class FinetuneFlow(FlowSpec):
         image=constants.FINETUNE_IMAGE_NAME,
         image_pull_policy="Always",
         cpu=2,
+        disk=10240,
         memory=4096,
         # secret to huggingfase that has to be added as a Kubernetes secret
         secrets=["hf-token"],
         # specify required GPU settings
         gpu=2,
         node_selector={"cloud.google.com/gke-accelerator": "nvidia-l4"},
+        persistent_volume_claims={
+            "hf-cache-pvc": "/tmp/hf-cache",
+        },
     )
     @retry
     @step
     def start(self):
         print("Start finetuning")
         import finetune
-
         finetune.finetune_and_upload_to_hf(
             new_model="finetunned-gemma2-9b"
         )

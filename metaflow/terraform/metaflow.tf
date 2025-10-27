@@ -30,7 +30,7 @@ module "metaflow_metadata_workload_identity" {
 
 resource "local_file" "metaflow-metadata-deployment-file" {
   content = templatefile(
-    "${path.module}/../metaflow/manifests/metaflow-metadata.yaml",
+    "${path.module}/../metaflow/manifests/templates/metaflow-metadata.yaml",
     {
       SERVICE_ACCOUNT_NAME = var.metaflow_kubernetes_service_account_name,
       CLOUDSQL_INSTANCE    = "${var.project_id}:${var.metaflow_cloudsql_instance_region}:${local.metaflow_cloudsql_instance}"
@@ -41,7 +41,7 @@ resource "local_file" "metaflow-metadata-deployment-file" {
 
 resource "local_file" "metaflow-ui-deployment-file" {
   content = templatefile(
-    "${path.module}/../metaflow/manifests/metaflow-ui.yaml",
+    "${path.module}/../metaflow/manifests/templates/metaflow-ui.yaml",
     {
       SERVICE_ACCOUNT_NAME = var.metaflow_kubernetes_service_account_name,
       CLOUDSQL_INSTANCE    = "${var.project_id}:${var.metaflow_cloudsql_instance_region}:${local.metaflow_cloudsql_instance}"
