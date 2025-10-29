@@ -1,0 +1,22 @@
+# This HealthCheckPolicy defines a custom health check for the "blue" VLLM service.
+# It ensures that the Gateway only sends traffic to healthy, responsive pods.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: blue-vllm-gemma-healthcheck-policy
+  namespace: default
+spec:
+  # targetRef specifies the Service this policy applies to.
+  targetRef:
+    group: "" # Core API group for Service
+    kind: Service
+    name: blue-llm-service
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        # The health endpoint for the VLLM server.
+        requestPath: /v1/models
+        # The port on the pod where the health check is exposed.
+        port: 8085
+

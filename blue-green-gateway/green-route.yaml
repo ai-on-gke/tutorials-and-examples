@@ -1,0 +1,37 @@
+# This HTTPRoute directs 100% of the traffic to the "green" environment
+# and 0% to the "blue" environment. Applying this manifest makes the
+# green environment the live, production version.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: blue-green-route
+spec:
+  # parentRefs links this route to the Gateway, allowing it to receive traffic.
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: blue-green-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    # backendRefs defines how traffic is distributed among services.
+    backendRefs:
+    - group: ""
+      kind: Service
+      name: blue-llm-service
+      port: 8085
+      # weight controls the percentage of traffic sent to this backend.
+      weight: 0
+    - group: ""
+      kind: Service
+      name: green-llm-service
+      port: 8086
+      weight: 100
+    filters:
+    - type: ResponseHeaderModifier
+      responseHeaderModifier:
+        set:
+        - name: X-Response-Service
+          value: green-service

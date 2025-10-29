@@ -1,0 +1,21 @@
+# Gemini-specific files
+GEMINI.md
+
+# General ignores
+*.log
+*.tmp
+*.swp
+*~
+.DS_Store
+
+# Editor-specific folders
+.idea/
+.vscode/
+
+# Build artifacts
+dist/
+build/
+
+# Python cache
+__pycache__/
+*.pyc

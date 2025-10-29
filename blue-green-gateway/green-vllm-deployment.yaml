@@ -1,0 +1,85 @@
+# This Deployment manifest defines the "green" environment for the VLLM inference server.
+# It is identical to the "blue" deployment but with a different name and label.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: green-vllm-gemma-deployment
+spec:
+  # replicas specifies the number of pod instances to run.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: green-gemma-server
+  template:
+    metadata:
+      labels:
+        app: green-gemma-server
+        ai.gke.io/model: gemma-3-1b-it
+        ai.gke.io/inference-server: vllm
+        examples.ai.gke.io/source: user-guide
+    spec:
+      containers:
+      - name: inference-server
+        # Using a standard vLLM container image
+        image: vllm/vllm-openai:v0.11.0
+        # resources defines the CPU, memory, and GPU required by the container.
+        resources:
+          requests:
+            cpu: "2"
+            memory: "10Gi"
+            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "2"
+            memory: "10Gi"
+            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        - --model=$(MODEL_ID)
+        - --tensor-parallel-size=1
+        - --host=0.0.0.0
+        - --port=8086
+        # --- ADD THESE LINES TO FIX POSSIBLE OOM ERRORS ---
+        - --gpu-memory-utilization=0.85
+        - --max-num-seqs=64
+        env:
+        - name: MODEL_ID
+          value: google/gemma-3-1b-it
+        # Fixes - https://github.com/vllm-project/vllm/issues/18859
+        - name: LD_LIBRARY_PATH
+          value: "/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_token
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        # livenessProbe checks if the container is running and responsive.
+        livenessProbe:
+          httpGet:
+            path: /v1/models
+            port: 8086
+          initialDelaySeconds: 300
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # readinessProbe checks if the container is ready to accept traffic.
+        readinessProbe:
+          httpGet:
+            path: /v1/models
+            port: 8086
+          initialDelaySeconds: 300
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: dshm
+        emptyDir:
+            medium: Memory
+      # nodeSelector ensures the pod is scheduled on a node with an NVIDIA L4 GPU.
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+        cloud.google.com/gke-gpu-driver-version: latest
