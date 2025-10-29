@@ -1,0 +1,134 @@
+# This file defines the Deployment for the VLLM inference server. It specifies the container image,
+# the resources to allocate, the command to run, and the environment variables to set.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-gemma-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      # The selector is used to identify the pods that are part of this Deployment.
+      app: gemma-server
+  template:
+    metadata:
+      labels:
+        app: gemma-server
+        # These labels are used to identify the model and inference server.
+        ai.gke.io/model: gemma-3-1b-it
+        ai.gke.io/inference-server: vllm
+        examples.ai.gke.io/source: user-guide
+    spec:
+      initContainers:
+        # The initContainer is used to sync the LoRA adapters from the ConfigMap to the container.
+        - name: lora-adapter-syncer
+          tty: true
+          stdin: true
+          image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/lora-syncer:main
+          restartPolicy: Always
+          imagePullPolicy: Always
+          env:
+            - name: DYNAMIC_LORA_ROLLOUT_CONFIG
+              value: "/config/configmap.yaml"
+          volumeMounts: # DO NOT USE subPath, dynamic configmap updates don't work on subPaths
+          - name: config-volume
+            mountPath:  /config
+      containers:
+      - name: inference-server
+        image: vllm/vllm-openai:v0.11.0
+        resources:
+          requests:
+            cpu: "2"
+            memory: "10Gi"
+            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "2"
+            memory: "10Gi"
+            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        # The args specify the command-line arguments to pass to the inference server.
+        - --model=$(MODEL_ID)
+        - --tensor-parallel-size=1
+        - --host=0.0.0.0
+        - --port=8000
+        - --enable-lora
+        # --- ADD THESE LINES TO FIX POSSIBLE OOM ERRORS ---
+        - --gpu-memory-utilization=0.85
+        - --max-num-seqs=64
+        env:
+        # The MODEL_ID environment variable specifies the base model to use.
+        - name: MODEL_ID
+          value: google/gemma-3-1b-it
+        # Fixes - https://github.com/vllm-project/vllm/issues/18859
+        - name: LD_LIBRARY_PATH
+          value: "/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: token
+        # Enabling LoRA support temporarily disables automatic v1, we want to force it on
+        # until 0.8.3 vLLM is released.
+        - name: VLLM_USE_V1
+          value: "1"
+        - name: VLLM_ALLOW_RUNTIME_LORA_UPDATING
+          value: "true"
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        livenessProbe:
+          httpGet:
+            path: /v1/models # Use the confirmed health endpoint
+            port: 8000
+          initialDelaySeconds: 300 # Give time for model to load (5 minutes)
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /v1/models # Use the confirmed health endpoint
+            port: 8000
+          initialDelaySeconds: 300 # Give time for model to load (5 minutes)
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      - name: adapters
+        emptyDir: {}
+      - name: config-volume
+        configMap:
+          # The configMap is used to mount the LoRA adapter configuration into the container.
+          name: vllm-gemma3-1b-adapters
+      nodeSelector:
+        # The nodeSelector is used to schedule the pod on a node with a specific GPU.
+        # Nvidia L4 GPU
+        # cloud.google.com/gke-accelerator: nvidia-l4
+        # Nvidia A100 40GB
+        cloud.google.com/gke-accelerator: nvidia-tesla-a100
+        cloud.google.com/gke-gpu-driver-version: latest
+---
+# This ConfigMap defines the LoRA adapters that will be applied to the base model.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-gemma3-1b-adapters
+data:
+  configmap.yaml: |
+      vLLMLoRAConfig:
+        name: vllm-gemma3-1b
+        port: 8000
+        # The defaultBaseModel is the model that is loaded into the VLLM inference server.
+        defaultBaseModel: google/gemma3-1b-it
+        ensureExist:
+          models:
+          # The models list specifies the LoRA adapters to apply to the base model.
+          - id: sql-chat
+            source: mlabonne/gemma-3-1b-it-lora-sql-chat

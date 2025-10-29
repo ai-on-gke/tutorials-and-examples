@@ -1,0 +1,17 @@
+# This file defines the Service for the VLLM inference server. It exposes the inference server
+# to other services in the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-service
+spec:
+  # The selector is used to identify the pods that are part of this Service.
+  selector:
+    app: gemma-server
+  type: ClusterIP
+  ports:
+    # The ports specify the port that the Service will listen on and the port that the
+    # inference server is listening on.
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000

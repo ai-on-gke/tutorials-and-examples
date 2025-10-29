@@ -1,0 +1,20 @@
+# This file defines the InferencePool resource, which is a custom resource that represents a pool
+# of inference servers. It is used to group together a set of pods that are serving the same model.
+# Source: inferencepool/templates/inferencepool.yaml
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferencePool
+metadata:
+  # The name of the InferencePool. This is used to reference the pool in other resources, such as HTTPRoutes.
+  name: inference-pool-vllm
+  namespace: default
+  labels:
+    app.kubernetes.io/name: inference-pool-vllm-epp
+    app.kubernetes.io/version: "v0.3.0"
+spec:
+  # The targetPortNumber is the port that the inference servers are listening on.
+  targetPortNumber: 8000
+  # The selector is used to identify the pods that are part of this InferencePool.
+  selector:
+    app: "gemma-server"
+  extensionRef:
+    name: inference-pool-vllm-epp

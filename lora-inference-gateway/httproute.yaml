@@ -1,0 +1,31 @@
+# This file defines the HTTPRoute resource, which is used to route traffic from the Gateway
+# to the backend services. It specifies the parent gateway, the matching rules for the route,
+# and the backend service to route the traffic to.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vllm-gemma-route
+spec:
+  # The parentRefs field specifies the Gateway that this route is attached to.
+  parentRefs:
+  - name: ai-inf-gateway
+  rules:
+  # The rules field defines the routing rules. In this case, we are matching all traffic
+  # with a path prefix of / and routing it to the inference-pool-vllm InferencePool.
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    # The backendRefs field specifies the backend service to route the traffic to.
+    - name: inference-pool-vllm
+      group: inference.networking.x-k8s.io
+      kind: InferencePool
+  # The following example is for a service backend.
+  # - matches:
+  #   - path:
+  #       type: PathPrefix
+  #       value: /
+  #   backendRefs:
+  #   - name: llm-service
+  #     port: 8000
