@@ -1,0 +1,24 @@
+# ---
+# vLLM Inference Server Service
+#
+# This manifest defines a Kubernetes Service to expose the vLLM deployment.
+# A Service provides a stable internal endpoint (a `ClusterIP`) for accessing the
+# vLLM pods. This allows other components within the cluster to reliably
+# communicate with the inference server without needing to know the individual pod IPs.
+# ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+spec:
+  # This selector must match the labels of the pods in the vLLM deployment
+  # to direct traffic to them.
+  selector:
+    app: gemma-server
+  # ClusterIP exposes the service on an internal-only IP. Access from outside the
+  # cluster is typically handled via `kubectl port-forward` for testing.
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      port: 8081
+      targetPort: 8081

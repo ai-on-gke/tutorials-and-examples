@@ -1,0 +1,77 @@
+# ---
+# vLLM Inference Server Deployment
+#
+# This manifest defines a Kubernetes Deployment for the vLLM inference server.
+# A Deployment manages a set of replica Pods, ensuring that a specified number
+# of them are running at all times.
+# ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-gemma-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gemma-server
+  template:
+    metadata:
+      labels:
+        # This label is used by the Service to route traffic to the pods and
+        # by the PodMonitoring resource to scrape metrics.
+        app: gemma-server
+        ai.gke.io/model: gemma-3-1b-it
+        ai.gke.io/inference-server: vllm
+        examples.ai.gke.io/source: user-guide
+    spec:
+      containers:
+      - name: inference-server
+        image: vllm/vllm-openai:v0.11.0
+        resources:
+          # Requesting a GPU is the critical step that triggers GKE Autopilot to provision a node
+          # with the necessary hardware. Limits are set to match requests for predictable performance.
+          requests:
+            cpu: "2"
+            memory: "10Gi"
+            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "2"
+            memory: "10Gi"
+            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        - --model=$(MODEL_ID)
+        - --tensor-parallel-size=1
+        - --host=0.0.0.0
+        - --port=8081
+        # --- ADD THESE LINES TO FIX POSSIBLE OOM ERRORS ---
+        - --gpu-memory-utilization=0.85
+        - --max-num-seqs=64
+        env:
+        - name: MODEL_ID
+          value: google/gemma-3-1b-it
+        # Fixes - https://github.com/vllm-project/vllm/issues/18859
+        - name: LD_LIBRARY_PATH
+          value: "/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+        # Securely provides the Hugging Face token to the container.
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_token
+        volumeMounts:
+        # /dev/shm (shared memory) is used by PyTorch for inter-process communication.
+        # Mounting a memory-backed volume here is crucial for performance.
+        - mountPath: /dev/shm
+          name: dshm
+      volumes:
+      - name: dshm
+        emptyDir:
+            # `medium: Memory` tells Kubernetes to use a RAM-backed filesystem (tmpfs).
+            medium: Memory
+      # Ensures the Pod is scheduled on a node with the specified GPU type.
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+        cloud.google.com/gke-gpu-driver-version: latest

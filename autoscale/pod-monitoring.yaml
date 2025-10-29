@@ -1,0 +1,24 @@
+# ---
+# PodMonitoring for vLLM Server Metrics
+#
+# This PodMonitoring resource configures GKE's Managed Service for
+# Prometheus to scrape metrics from the vLLM inference server pods.
+# It is a namespaced resource, targeting pods within the same namespace
+# where it is applied (e.g., 'default').
+# ---
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: gemma-pod-monitoring
+spec:
+  # The selector tells Prometheus which pods to scrape.
+  selector:
+    # It will look for any pod with this label. This label must be present
+    # on the vLLM server deployment's pod template.
+    matchLabels:
+      app: gemma-server
+  endpoints:
+  # This section defines how to connect to the pods to get the metrics.
+  - port: 8081 # The container port on the vLLM server that exposes the metrics endpoint.
+    path: /metrics # The path of the metrics endpoint.
+    interval: 15s # The frequency at which Prometheus will scrape the metrics.

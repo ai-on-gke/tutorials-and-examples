@@ -1,0 +1,30 @@
+# ---
+# ClusterPodMonitoring for NVIDIA GPU Metrics
+#
+# This ClusterPodMonitoring resource configures Prometheus to scrape
+# NVIDIA GPU metrics from the DCGM exporter.
+#
+# A `ClusterPodMonitoring` is used because the DCGM exporter pods run in the
+# protected `gke-managed-system` namespace, which is inaccessible to a
+# standard, namespaced `PodMonitoring` resource.
+# ---
+apiVersion: monitoring.googleapis.com/v1
+kind: ClusterPodMonitoring
+metadata:
+  name: nvidia-dcgm-exporter-hpa-source
+spec:
+  # The selector tells Prometheus which pods to scrape, cluster-wide.
+  selector:
+    matchLabels:
+      # This label is automatically applied to the DCGM exporter pods managed by GKE.
+      app.kubernetes.io/name: gke-managed-dcgm-exporter
+  endpoints:
+  - port: metrics # The port on the DCGM exporter where metrics are exposed.
+    interval: 15s  # The frequency for scraping.
+    # metricRelabeling is used to filter the scraped metrics *before* they are
+    # ingested into Prometheus. This is a performance optimization.
+    metricRelabeling:
+    # This rule tells Prometheus to only keep the specific metric we need for autoscaling.
+    - sourceLabels: [__name__] # The source label to match against (the metric name).
+      regex: 'DCGM_FI_DEV_GPU_UTIL' # The regex to match.
+      action: keep # The action to take: keep only the metrics that match.
