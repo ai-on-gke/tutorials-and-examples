@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sample-app
+  template:
+    metadata:
+      labels:
+        app: sample-app
+    spec:
+      runtimeClassName: confidential-linked-runner
+      containers:
+      - name: sample-app-container
+        image: ${SAMPLE_APP_IMAGE}
+        command: ["/sample-app"]
+        args:
+        - "--kek_uri"
+        - "${KEKURI}"
+        - "--gcs_blob_path"
+        - "${GCSPATH}"
+        - "--project_number"
+        - "${PROJECT_NUMBER}"
+        - "--wip_name"
+        - "${WIP_NAME}"
+        - "--wip_provider"
+        - "${WIP_PROVIDER}"
+        imagePullPolicy: Always
+        volumeMounts:
+            - name: shared-data
+              mountPath: /data
+      volumes:
+          - name: shared-data
+            emptyDir:
+                medium: Memory

@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: jax-worker-svc
+spec:
+  clusterIP: None
+  selector:
+    app: jax-worker
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: jax-worker
+spec:
+  serviceName: "jax-worker-svc"
+  replicas: 4
+  selector:
+    matchLabels:
+      app: jax-worker
+  template:
+    metadata:
+      labels:
+        app: jax-worker
+    spec:
+      runtimeClassName: confidential-linked-runner
+      containers:
+      - name: nginx-server-container
+        image: ${SIGNED_NGINX_IMAGE}
+        ports:
+        - containerPort: 80
+        command:
+        - bash
+        - -c
+        - |
+          nginx -g 'daemon off;'
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: shared-data
+          mountPath: /usr/share/nginx/html
+      - name: jax-app
+        image: ${SIGNED_TPU_IMAGE}
+        securityContext:
+          privileged: true
+        command:
+        - "/bin/bash"
+        - "-c"
+        - |
+          echo "Starting TPU workload" > /nginx-data/index.html
+          echo "----------------------------------------------------------" >> /nginx-data/index.html
+          export TPU_WORKER_ID=${HOSTNAME##*-}
+          HOSTS=()
+          for i in $(seq 0 $((${REPLICAS} - 1))); do
+            HOSTS+=("jax-worker-${i}.jax-worker-svc")
+          done
+          export TPU_WORKER_HOSTNAMES=$(IFS=,; echo "${HOSTS[*]}")
+          echo "My TPU_WORKER_ID is: ${TPU_WORKER_ID}" >> /nginx-data/index.html
+          echo "Discovered TPU workers: ${TPU_WORKER_HOSTNAMES}" >> /nginx-data/index.html
+          echo "Starting JAX workload..."
+          python -c 'import jax; jax.distributed.initialize()'
+          python -c 'import jax; print("Local device count:", jax.local_device_count());' >> /nginx-data/index.html
+          python -c 'import jax; print("Global device count:", jax.device_count());' >> /nginx-data/index.html
+          echo "JAX workload script finished."
+          
+          echo "----------------------------------------------------------" >> /nginx-data/index.html
+          ip a >> /nginx-data/index.html
+          
+          echo "----------------------------------------------------------" >> /nginx-data/index.html
+          export TOKEN=$(curl --unix-socket '/run/launcher-agent/teeserver.sock' 'http://localhost/v1/gke/token')
+          echo "Got Identity Token:" >> /nginx-data/index.html
+          echo "$TOKEN" >> /nginx-data/index.html
+          echo "----------------------------------------------------------" >> /nginx-data/index.html
+          sleep infinity
+        env:
+        - name: REPLICAS
+          value: "4"
+        - name: TPU_CHIP_COUNT
+          value: "16"
+        - name: TPU_HOST_BOUNDS
+          value: "2,2,1"
+        - name: TPU_CHIPS_PER_HOST_BOUNDS
+          value: "2,2,1"
+        - name: TPU_ACCELERATOR_TYPE
+          value: "v5litepod4"
+        - name: TPU_TOPOLOGY_ALT
+          value: "false"
+        - name: TPU_TOPOLOGY_WRAP
+          value: "false,false,false"
+        - name: TPU_SKIP_MDS_QUERY
+          value: "true"
+        volumeMounts:
+          - name: shared-data
+            mountPath: /nginx-data
+      nodeSelector:
+        cloud.google.com/gke-nodepool: tpu-control-node
+      volumes:
+        - name: shared-data
+          emptyDir: {}
