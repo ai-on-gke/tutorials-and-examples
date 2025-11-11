@@ -91,7 +91,7 @@ spec:
           - name: shared-data
             mountPath: /nginx-data
       nodeSelector:
-        cloud.google.com/gke-nodepool: tpu-control-node
+        cloud.google.com/gke-nodepool: ${CONTROL_NODE_POOL}
       volumes:
         - name: shared-data
           emptyDir: {}
