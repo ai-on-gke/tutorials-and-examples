@@ -1,6 +1,6 @@
-This sample application is meant to be used together with a separate guide 
-and not as a standalone repository to help demonstrate how to decrypt and
-encrypt data in a TEE(Trusted Execution Environment) in GKE.
+This sample application demonstrates how to decrypt encrypted data in a TEE (Trusted Execution Environment) in GKE. 
+
+Note: These manifests use configurations that won't run in typical GKE clusters.
 
 # Encrypt data and push it to a GCS bucket
 ```
@@ -20,14 +20,13 @@ output/tink-encryptor \
 
 # Deploy Workload to decrypt data in the GCS bucket
 
-## Create Container Image that can decrypt the data.
+## Create a Container Image that can decrypt the data.
 ```
 docker build -t my-repo/my-image:tag .
 docker push my-repo/my-image:tag
 ```
 
 ## Run Sample CPU workload in TEE
-NOTE: Follow the guide to sign the newly created image before running it in the TEE.
 
 ```
 export GCS_BUCKET_NAME_FOR_ENCRYPTED_DATA=<fill in>
@@ -47,12 +46,13 @@ envsubst < manifests/sample-app.yaml | kubectl apply -f -
 ```
 
 ## Run Sample TPU workload in TEE
-NOTE: Follow the guide to sign the nginx and tpu images before running it in the TEE.
+
+Make the following edits to `manifests/sample-tpu.yaml`
+
+* Replace NODE_POOL_NAME with the name of the node pool that you want to run the workload on.
+* Replace NGINX_IMAGE with a nginx image hosted in Artifact Registry.
+* Replace TPU_IMAGE with a TPU jax image hosted in Artifact Registry.
 
 ```
-export SIGNED_NGINX_IMAGE=<fill in>
-export SIGNED_TPU_IMAGE=<fill in>
-
-envsubst < manifests/sample-tpu.yaml | kubectl apply -f -
+kubectl apply -f manifests/sample-tpu.yaml
 ```
-

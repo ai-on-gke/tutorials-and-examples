@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# [START gke_quickstarts_hello_app_dockerfile]
 FROM golang:1.24.8 AS builder
 
 WORKDIR /go/src/app

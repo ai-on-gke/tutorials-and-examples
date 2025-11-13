@@ -25,7 +25,7 @@ spec:
       runtimeClassName: confidential-linked-runner
       containers:
       - name: nginx-server-container
-        image: ${SIGNED_NGINX_IMAGE}
+        image: NGINX_IMAGE # Replace this with the nginx image you want to use.
         ports:
         - containerPort: 80
         command:
@@ -38,7 +38,7 @@ spec:
         - name: shared-data
           mountPath: /usr/share/nginx/html
       - name: jax-app
-        image: ${SIGNED_TPU_IMAGE}
+        image: TPU_IMAGE # Replace this with the TPU image you want to use.
         securityContext:
           privileged: true
         command:
@@ -56,9 +56,8 @@ spec:
           echo "My TPU_WORKER_ID is: ${TPU_WORKER_ID}" >> /nginx-data/index.html
           echo "Discovered TPU workers: ${TPU_WORKER_HOSTNAMES}" >> /nginx-data/index.html
           echo "Starting JAX workload..."
-          python -c 'import jax; jax.distributed.initialize()'
           python -c 'import jax; print("Local device count:", jax.local_device_count());' >> /nginx-data/index.html
-          python -c 'import jax; print("Global device count:", jax.device_count());' >> /nginx-data/index.html
+          python -c 'import jax; jax.distributed.initialize(); print("Global device count:", jax.device_count());' >> /nginx-data/index.html
           echo "JAX workload script finished."
           
           echo "----------------------------------------------------------" >> /nginx-data/index.html
@@ -87,11 +86,13 @@ spec:
           value: "false,false,false"
         - name: TPU_SKIP_MDS_QUERY
           value: "true"
+        - name: JAX_PLATFORMS
+          value: "tpu"
         volumeMounts:
           - name: shared-data
             mountPath: /nginx-data
       nodeSelector:
-        cloud.google.com/gke-nodepool: ${CONTROL_NODE_POOL}
+        cloud.google.com/gke-nodepool: NODE_POOL_NAME # Replace this with the nodepool you want to schedule the workload on.
       volumes:
         - name: shared-data
           emptyDir: {}

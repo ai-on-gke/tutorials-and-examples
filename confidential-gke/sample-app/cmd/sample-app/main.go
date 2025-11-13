@@ -12,8 +12,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	storage "cloud.google.com/go/storage"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/tink-crypto/tink-go-gcpkms/v2/integration/gcpkms"
 	"github.com/tink-crypto/tink-go/v2/aead"
 	option "google.golang.org/api/option"
@@ -33,6 +36,22 @@ const (
 	attestationTokenPath = "/data/attestation_verifier_claims_token"
 )
 
+type confGKE struct {
+	TEEPolicyDigest string `json:"tee_policy_digest"`
+}
+
+type subMods struct {
+	ConfidentialGKE confGKE `json:"confidential_gke"`
+}
+
+type customClaim struct {
+	HWModel   string   `json:"hwmodel"`
+	SWName    string   `json:"swname"`
+	SWVersion []string `json:"swversion"`
+	SubMods   subMods  `json:"submods"`
+	jwt.RegisteredClaims
+}
+
 type credentialSource struct {
 	FilePath string `json:"file"`
 }
@@ -46,32 +65,81 @@ type credentialConfig struct {
 	CredentialSource credentialSource `json:"credential_source"`
 }
 
+var (
+	credConfigJSON        []byte
+	refreshTokenOpSummary strings.Builder
+)
+
 func main() {
 	flag.Parse()
 
-	// register sample function to handle all requests
+	// Register sample function to handle all requests.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", sample)
 
-	// use PORT environment variable, or default to 8080
+	// Use PORT environment variable, or default to 8080.
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	// start the web server on port and accept requests
+	// start the web server on port and accept requests.
+	if err := refreshJWTRoutine(); err != nil {
+		log.Printf("loopJWTRefresh failed: %v", err)
+	}
+
 	log.Printf("Server listening on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
-func sample(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+func decodeJWT(token []byte) (*jwt.Token, error) {
+	accessToken := string(token)
+	fmt.Fprintf(&refreshTokenOpSummary, "Token from the attestation service: %s\n", accessToken)
+	parser := jwt.NewParser()
+	claim := &customClaim{}
+	// Use ParseUnverified because we just need to decode for the expire time.
+	// Validation of the token is done on the server side by Workload Identity Federation.
+	jwtToken, _, err := parser.ParseUnverified(accessToken, claim)
+	if err != nil {
+		fmt.Fprintf(&refreshTokenOpSummary, "jwt.Parse failed: %v\n", err)
+		return nil, err
+	}
+	return jwtToken, nil
+}
 
-	log.Printf("Serving request: %s", r.URL.Path)
+func refreshJWT() error {
+	fmt.Fprintf(&refreshTokenOpSummary, "Starting JWT Refresh Operation at %v\n", time.Now())
+	token, err := getJwt()
+	if err != nil {
+		return err
+	}
+	// Write the data to the file with read/write permissions for the owner.
+	if err := os.WriteFile(attestationTokenPath, token, 0644); err != nil {
+		return err
+	}
+	jwtToken, err := decodeJWT(token)
+	if err != nil {
+		return err
+	}
+	expireTime, err := jwtToken.Claims.GetExpirationTime()
+	if err != nil {
+		return err
+	}
+	// Setup the refresh operation to happen again after the token's expire time.
+	refreshDuration := time.Until(expireTime.Time)
+	fmt.Fprintf(&refreshTokenOpSummary, "Refreshing JWT in %f minutes\n", refreshDuration.Minutes())
+	time.AfterFunc(refreshDuration, func() {
+		if err := refreshJWT(); err != nil {
+			fmt.Fprintf(&refreshTokenOpSummary, "refreshJWT failed: %v\n", err)
+		}
+	})
+	return nil
+}
 
+func refreshJWTRoutine() error {
+	// One time setup.
 	if err := validateFlags(); err != nil {
-		fmt.Fprintf(w, "error validating flags: %v", err)
-		return
+		return fmt.Errorf("error validating flags: %w", err)
 	}
 
 	audience := fmt.Sprintf("//iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/providers/%s", *projectNumber, *wipName, *wipProvider)
@@ -85,31 +153,41 @@ func sample(w http.ResponseWriter, r *http.Request) {
 			FilePath: attestationTokenPath,
 		},
 	}
-	credConfigJSON, err := json.Marshal(credConfig)
+	var err error
+	credConfigJSON, err = json.Marshal(credConfig)
 	if err != nil {
-		fmt.Fprintf(w, "error marshaling credential config: %v\n", err)
+		return fmt.Errorf("error marshaling credential config: %w", err)
+	}
+	// Initial call.
+	if err := refreshJWT(); err != nil {
+		return fmt.Errorf("refreshJWT failed: %w", err)
+	}
+
+	return nil
+}
+
+func sample(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	// Reset the summary at the end of every request.
+	defer refreshTokenOpSummary.Reset()
+
+	log.Printf("Serving request: %s", r.URL.Path)
+
+	if err := validateFlags(); err != nil {
+		fmt.Fprintf(w, "error validating flags: %v", err)
 		return
 	}
+
 	fmt.Fprintf(w, "Using Credential Config:\n%s\n", string(credConfigJSON))
+	if len(credConfigJSON) == 0 {
+		fmt.Fprintf(w, "credential config was not generated successfully, skipping operation.")
+		return
+	}
 
 	host, _ := os.Hostname()
 	fmt.Fprintf(w, "Hostname: %s\n", host)
-
-	jwt, err := getJwt()
-	if err != nil {
-		fmt.Fprintf(w, "Error getting JWT: %s\n", err)
-	} else {
-		fmt.Fprintf(w, "JWT: %s\n", jwt)
-	}
-
-	data := []byte(jwt)
-
-	// Write the data to the file with read/write permissions for the owner
-	err = os.WriteFile(attestationTokenPath, data, 0644)
-	if err != nil {
-		fmt.Printf("Error writing to file: %v\n", err)
-		return
-	}
+	// Output any errors or information from the token refresh operations to help with debugging.
+	fmt.Fprintf(w, "JWT Refresh Operation Summary:\n%s\n", refreshTokenOpSummary.String())
 
 	file, err := getFileFromGCS(ctx, credConfigJSON)
 	if err != nil {
@@ -128,30 +206,38 @@ func sample(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func getJwt() (string, error) {
-	httpClient := http.Client{
-		Transport: &http.Transport{
-			// Set the DialContext field to a function that creates
-			// a new network connection to a Unix domain socket
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", socketPath)
-			},
+func getJwt() ([]byte, error) {
+	client := retryablehttp.NewClient()
+	// Configure retry options (optional)
+	// Sets the maximum number of retries (default is 4)
+	client.RetryMax = 5
+
+	// Sets the initial backoff wait time (default is 1 second)
+	// and the maximum wait time (default is 30 seconds).
+	client.RetryWaitMin = 1 * time.Second
+	client.RetryWaitMax = 5 * time.Second
+
+	client.HTTPClient.Transport = &http.Transport{
+		// Set the DialContext field to a function that creates
+		// a new network connection to a Unix domain socket
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", socketPath)
 		},
 	}
 
-	resp, err := httpClient.Get(tokenEndpoint)
+	resp, err := client.Get(tokenEndpoint)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	log.Printf("Response from launcher: %v\n", resp)
 	text, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read resp.Body: %w", err)
+		return nil, fmt.Errorf("failed to read resp.Body: %w", err)
 	}
 	log.Printf("Token from the attestation service: %s\n", text)
 
-	return string(text), nil
+	return text, nil
 }
 
 func getFileFromGCS(ctx context.Context, credConfig []byte) (string, error) {
