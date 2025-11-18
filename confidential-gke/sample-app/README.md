@@ -4,6 +4,8 @@ Note: These manifests use configurations that won't run in typical GKE clusters.
 
 # Encrypt data and push it to a GCS bucket
 ```
+go mod tidy
+go mod vendor
 go build -o output/ ./cmd/tink-encryptor
 
 export GCS_BUCKET_NAME_FOR_ENCRYPTED_DATA=<fill in>
