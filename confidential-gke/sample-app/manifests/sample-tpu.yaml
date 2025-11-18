@@ -56,8 +56,7 @@ spec:
           echo "My TPU_WORKER_ID is: ${TPU_WORKER_ID}" >> /nginx-data/index.html
           echo "Discovered TPU workers: ${TPU_WORKER_HOSTNAMES}" >> /nginx-data/index.html
           echo "Starting JAX workload..."
-          python -c 'import jax; print("Local device count:", jax.local_device_count());' >> /nginx-data/index.html
-          python -c 'import jax; jax.distributed.initialize(); print("Global device count:", jax.device_count());' >> /nginx-data/index.html
+          python -c 'import jax; print("Global device count:", jax.device_count());' >> /nginx-data/index.html
           echo "JAX workload script finished."
           
           echo "----------------------------------------------------------" >> /nginx-data/index.html
@@ -86,8 +85,6 @@ spec:
           value: "false,false,false"
         - name: TPU_SKIP_MDS_QUERY
           value: "true"
-        - name: JAX_PLATFORMS
-          value: "tpu"
         volumeMounts:
           - name: shared-data
             mountPath: /nginx-data
