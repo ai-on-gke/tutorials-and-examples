@@ -68,6 +68,7 @@ type credentialConfig struct {
 var (
 	credConfigJSON        []byte
 	refreshTokenOpSummary strings.Builder
+	jwtErr                error
 )
 
 func main() {
@@ -85,7 +86,8 @@ func main() {
 
 	// start the web server on port and accept requests.
 	if err := refreshJWTRoutine(); err != nil {
-		log.Printf("loopJWTRefresh failed: %v", err)
+		fmt.Fprintf(&refreshTokenOpSummary, "refreshJWT loopJWTRefresh: %v\n", err)
+		jwtErr = err
 	}
 
 	log.Printf("Server listening on port %s", port)
@@ -117,6 +119,9 @@ func refreshJWT() error {
 	if err := os.WriteFile(attestationTokenPath, token, 0644); err != nil {
 		return err
 	}
+	// Reset JWT error after successful operation.
+	jwtErr = nil
+	// Decode the JWT to get the experation time to know when to refresh it.
 	jwtToken, err := decodeJWT(token)
 	if err != nil {
 		return err
@@ -174,13 +179,18 @@ func sample(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Serving request: %s", r.URL.Path)
 
 	if err := validateFlags(); err != nil {
-		fmt.Fprintf(w, "error validating flags: %v", err)
+		fmt.Fprintf(w, "error validating flags: %v\n", err)
 		return
 	}
 
 	fmt.Fprintf(w, "Using Credential Config:\n%s\n", string(credConfigJSON))
 	if len(credConfigJSON) == 0 {
 		fmt.Fprintf(w, "credential config was not generated successfully, skipping operation.")
+		return
+	}
+
+	if jwtErr != nil {
+		fmt.Fprintf(w, "error obtaining JWT: %v\n", jwtErr)
 		return
 	}
 
