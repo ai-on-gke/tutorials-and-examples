@@ -46,22 +46,13 @@ resource "google_container_cluster" "cgke_cluster" {
 
   min_master_version = var.cluster_version
 
-  # for IP aliasing
-  ip_allocation_policy {}
-
   datapath_provider = "ADVANCED_DATAPATH"
 
   release_channel {
     channel = "UNSPECIFIED"
   }
-
-  network    = "default"
-  subnetwork = "default"
-
-  logging_service    = "logging.googleapis.com/kubernetes"
-  monitoring_service = "monitoring.googleapis.com/kubernetes"
   
-  deletion_protection = false
+  deletion_protection = true  # Recommended
 }
 
 # ----- CPU Control Node Pool -----
