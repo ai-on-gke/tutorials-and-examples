@@ -32,6 +32,7 @@ reservation_project_id = "<RESERVATION_PROJECT_ID>"   # Fill in for TPU reservat
 reservation_name       = "<RESERVATION_NAME>"         # Fill in for TPU reservation
 
 # [OPTIONAL] Additional node network
+# If you don't need the resources in network.tf, remove below and also from variables.tf
 network_name           = "<NETWORK_NAME>"
 subnetwork_name        = "<SUBNETWORK_NAME>"
 subnetwork_region      = "<SUBNETWORK_REGION>"        # Usually matches cluster region

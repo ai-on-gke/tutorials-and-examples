@@ -75,7 +75,8 @@ variable "reservation_name" {
   type        = string
 }
 
-# Additional node network
+# [OPTIONAL] Additional node network variables used in network.tf
+# Clean up the below variables if network.tf is removed
 variable "network_name" {
   description = "Name of the VPC network"
   type        = string
