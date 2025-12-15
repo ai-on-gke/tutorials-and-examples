@@ -29,7 +29,7 @@ provider "google-private" {
 }
 
 resource "google_container_cluster" "cgke_cluster" {
-  provider = google-private
+  provider = google-private  # Can use public "google" provider for GKE clusters
 
   project  = var.project_id
   location = var.location
@@ -54,14 +54,8 @@ resource "google_container_cluster" "cgke_cluster" {
   release_channel {
     channel = "UNSPECIFIED"
   }
-
-  network    = "default"
-  subnetwork = "default"
-
-  logging_service    = "logging.googleapis.com/kubernetes"
-  monitoring_service = "monitoring.googleapis.com/kubernetes"
   
-  deletion_protection = false
+  deletion_protection = true  # Recommended to avoid unexpected cluster replacement
 }
 
 # ----- CPU Control Node Pool -----
