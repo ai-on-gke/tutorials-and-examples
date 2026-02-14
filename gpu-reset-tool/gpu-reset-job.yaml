@@ -1,0 +1,248 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: gpu-reset-manual-job-
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: gpu-reset-sa
+      nodeName: ##NODE_NAME## # IMPORTANT: This must be set before applying
+      restartPolicy: Never
+      hostPID: true
+      hostNetwork: true
+      terminationGracePeriodSeconds: 300
+      containers:
+      - name: gpu-reset-manual
+        image: alpine:latest
+        command: ["/bin/sh", "-c"]
+        env:
+        - name: LD_LIBRARY_PATH
+          value: /usr/local/nvidia/lib64
+        - name: TARGET_NODE
+          value: "##NODE_NAME##"
+        - name: RESET_THRESHOLD_DAYS
+          value: "##RESET_THRESHOLD_DAYS##"
+        args:
+        - |
+          #!/bin/sh
+          apk add --no-cache bash kubectl lsblk gawk coreutils jq
+
+          echo "Starting GPU MANUAL reset process..."
+          if [ -z "${TARGET_NODE:-}" ]; then
+            echo "ERROR: TARGET_NODE must be set for manual reset."
+            exit 1
+          fi
+
+          NODE="${TARGET_NODE}"
+          RESET_THRESHOLD="${RESET_THRESHOLD_DAYS}"
+          echo "Targeting node: $NODE"
+
+          echo "Checking node uptime..."
+          UPTIME_SECONDS="$(cat /proc/uptime | awk '{print $1}')"
+          if [ -z "$UPTIME_SECONDS" ]; then
+              echo "ERROR: Failed to read uptime from /proc/uptime."
+              exit 1
+          fi
+
+          if ! echo "$UPTIME_SECONDS" | grep -E -q '^[0-9]+(\.[0-9]+)?$'; then
+              echo "Warning: Could not get valid uptime from node $NODE. Logs: $UPTIME_SECONDS"
+              UPTIME_SECONDS=0
+          fi
+          UPTIME_SECONDS_INT=${UPTIME_SECONDS%%.*}
+          UPTIME_DAYS=$((UPTIME_SECONDS_INT / 86400))
+          echo "Node $NODE uptime: $UPTIME_DAYS days"
+
+          LAST_RESET_LABEL="gpu-reset.gke.io/last-reset-seconds"
+          LAST_RESET_SECONDS_STR=$(kubectl get node $NODE -o json | jq -r ".metadata.labels[\"${LAST_RESET_LABEL}\"]")
+          echo "Last reset label found: $LAST_RESET_SECONDS_STR"
+
+          DAYS_SINCE_LAST_RESET=1000 # Default to a large value if no timestamp
+          if [ -n "$LAST_RESET_SECONDS_STR" ] && [ "$LAST_RESET_SECONDS_STR" != "<no value>" ] && [ "$LAST_RESET_SECONDS_STR" -eq "$LAST_RESET_SECONDS_STR" ] 2>/dev/null; then
+            LAST_RESET_SECONDS=$((LAST_RESET_SECONDS_STR))
+              CURRENT_SECONDS=$(date +%s)
+              SECONDS_SINCE_LAST_RESET=$((CURRENT_SECONDS - LAST_RESET_SECONDS))
+              DAYS_SINCE_LAST_RESET=$((SECONDS_SINCE_LAST_RESET / 86400))
+              echo "Days since last reset: $DAYS_SINCE_LAST_RESET"
+          else
+            echo "No valid last reset timestamp label found on $NODE."
+          fi
+
+          if [ "$UPTIME_DAYS" -le "${RESET_THRESHOLD_DAYS}" ]; then
+            echo "Skipping GPU reset: Node uptime ($UPTIME_DAYS days) is not greater than ${RESET_THRESHOLD_DAYS} days."
+            exit 0
+          fi
+
+          if [ "$DAYS_SINCE_LAST_RESET" -le "${RESET_THRESHOLD_DAYS}" ]; then
+            echo "Skipping GPU reset: Less than ${RESET_THRESHOLD_DAYS} days since last reset ($DAYS_SINCE_LAST_RESET days ago)."
+            exit 0
+          fi
+
+          echo "Conditions met: Uptime > ${RESET_THRESHOLD_DAYS} days AND (Last reset > ${RESET_THRESHOLD_DAYS} days ago or never)."
+
+          echo "Proceeding with manual reset on node $NODE..."
+
+          echo "Cordoning $NODE..."
+          kubectl cordon $NODE
+          echo "Tainting $NODE for draining..."
+          kubectl taint node $NODE gpu-reset=draining:NoSchedule --overwrite
+
+          DRIVER_LABEL="cloud.google.com/gke-gpu-driver-version"
+          ORIGINAL_DRIVER_VERSION=$(kubectl get node $NODE -o json | jq -r ".metadata.labels[\"${DRIVER_LABEL}\"]")
+          if [ -z "$ORIGINAL_DRIVER_VERSION" ] || [ "$ORIGINAL_DRIVER_VERSION" == "null" ]; then
+            echo "ERROR: Failed to get current driver version label ${DRIVER_LABEL} on node $NODE."
+            exit 1
+          fi
+          echo "Original driver version on $NODE: $ORIGINAL_DRIVER_VERSION"
+
+          BACKUP_LABEL="gpu-reset.gke.io/original-driver-version"
+          echo "Backing up original driver version '$ORIGINAL_DRIVER_VERSION' to label $BACKUP_LABEL on $NODE..."
+          kubectl label node $NODE $BACKUP_LABEL=$ORIGINAL_DRIVER_VERSION --overwrite
+
+          cat << 'EOF' > /tmp/cleanup.sh
+          #!/bin/sh
+          echo "--- Running Cleanup for ${TARGET_NODE} --- "
+          NODE="${TARGET_NODE}"
+          DRIVER_LABEL="cloud.google.com/gke-gpu-driver-version"
+          BACKUP_LABEL="gpu-reset.gke.io/original-driver-version"
+
+          RESTORE_VERSION=$(kubectl get node $NODE -o json | jq -r ".metadata.labels[\"${BACKUP_LABEL}\"]" 2>/dev/null)
+          if [ -z "$RESTORE_VERSION" ] || [ "$RESTORE_VERSION" = "null" ]; then
+            echo "ERROR: Backup driver version not found on $NODE label $BACKUP_LABEL. Cleanup failed."
+            exit 1
+          fi
+          echo "Restoring driver label $DRIVER_LABEL=$RESTORE_VERSION on $NODE..."
+          kubectl label node $NODE $DRIVER_LABEL=$RESTORE_VERSION --overwrite
+
+          echo "Re-enabling GPU device plugin on $NODE..."
+          kubectl label node $NODE gke-no-default-nvidia-gpu-device-plugin=false --overwrite
+          echo "Uncordoning $NODE..."
+          kubectl uncordon $NODE
+          echo "Removing drain taint from $NODE..."
+          kubectl taint node $NODE gpu-reset:NoSchedule-
+          echo "Removing backup label $BACKUP_LABEL on $NODE..."
+          kubectl label node $NODE $BACKUP_LABEL-
+          echo "--- Cleanup for $NODE Finished --- "
+          EOF
+          
+          chmod +x /tmp/cleanup.sh
+          trap '. /tmp/cleanup.sh' EXIT
+
+          echo "Disabling GPU device plugin on $NODE using label..."
+          kubectl label node $NODE gke-no-default-nvidia-gpu-device-plugin=true --overwrite
+
+          echo "Waiting for device plugin pod to terminate on $NODE..."
+          for i in $(seq 1 30); do
+              PLUGIN_POD=$(kubectl get pods -n kube-system --field-selector spec.nodeName=$NODE -l k8s-app=nvidia-gpu-device-plugin -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "")
+              if [ -z "$PLUGIN_POD" ]; then
+                  echo "Device plugin pod terminated."
+                  break
+              fi
+              echo "Waiting for plugin pod $PLUGIN_POD to terminate... (Attempt $i/30)"
+              sleep 10
+              if [ $i -eq 30 ]; then
+                  echo "ERROR: Device plugin pod did not terminate in time."
+                  exit 1
+              fi
+          done
+
+          echo "Setting label $DRIVER_LABEL=reset on $NODE to stop dcgm-exporter..."
+          kubectl label node $NODE $DRIVER_LABEL=reset --overwrite
+          echo "Waiting 30s for label change to propagate and dcgm-exporter to stop..."
+          sleep 30
+
+          DCGM_POD=$(kubectl get pods -n gke-managed-system -o wide --field-selector spec.nodeName=$NODE | grep dcgm-exporter | awk "{print \$1}" || true)
+          if [ -n "$DCGM_POD" ]; then
+             echo "Waiting for dcgm-exporter pod $DCGM_POD to terminate on $NODE..."
+             for i in $(seq 1 12); do
+                 if ! kubectl get pod $DCGM_POD -n gke-managed-system > /dev/null 2>&1; then
+                     echo "dcgm-exporter pod terminated."
+                     DCGM_POD=""
+                     break
+                 fi
+                 echo "Waiting for dcgm-exporter pod $DCGM_POD to terminate... (Attempt $i/12)"
+                 sleep 10
+             done
+             if [ -n "$DCGM_POD" ]; then
+                  echo "WARNING: dcgm-exporter pod $DCGM_POD did not terminate in time on $NODE. Force deleting..."
+                  kubectl delete pod $DCGM_POD -n gke-managed-system --force --grace-period=0 || echo "Failed to force delete DCGM pod"
+                  sleep 10 # Give time for force delete to take effect
+             fi
+          else
+              echo "No dcgm-exporter pod found on $NODE."
+          fi
+
+          echo "Waiting 30s for GPU resources to be fully released..."
+          sleep 30
+
+          echo "Running GPU reset on $NODE..."
+          echo "--- Diagnostic Info ---"
+          echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+          echo "--- nvidia-smi ---"
+          /usr/local/nvidia/bin/nvidia-smi || echo "nvidia-smi failed"
+          echo "--- End Diagnostic Info ---"
+          
+          echo "--- PRE-RESET --- $(date)"
+          if /usr/local/nvidia/bin/nvidia-smi --gpu-reset; then
+            echo "GPU reset command SUCCEEDED --- $(date)"
+            kubectl label node $NODE "$LAST_RESET_LABEL"=$(date +%s) --overwrite
+          else
+            EC=$?
+            echo "GPU reset command FAILED with exit code $EC --- $(date)"
+            exit $EC
+          fi
+          echo "--- POST-RESET --- $(date)"
+
+          echo "GPU reset finished on $NODE."
+          # Cleanup will run automatically via trap
+
+          echo "Manual reset process finished for node $NODE."
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - "/bin/sh"
+              - "-c"
+              - |
+                echo '--- Running preStop hook for $TARGET_NODE ---'
+                if [ -f /tmp/cleanup.sh ]; then
+                  . /tmp/cleanup.sh
+                else
+                  echo 'ERROR: Cleanup script /tmp/cleanup.sh not found!'
+                  # Fallback logic just in case
+                  NODE="${TARGET_NODE}"
+                  kubectl uncordon $NODE || echo 'Failed to uncordon'
+                  kubectl taint node $NODE gpu-reset- || echo 'Failed to remove taint'
+                fi
+                echo '--- preStop hook for $TARGET_NODE Finished ---'
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: nvidia-lib
+          mountPath: /usr/local/nvidia
+        - name: lib64
+          mountPath: /lib64
+        - name: host-proc # Needed for uptime check within the main script pod
+          mountPath: /proc
+          readOnly: true
+        # Add other necessary volume mounts if required by kubectl in the script
+        - name: kubeconfig
+          mountPath: /root/.kube
+          readOnly: true
+      volumes:
+      - name: nvidia-lib
+        hostPath:
+          path: /home/kubernetes/bin/nvidia
+      - name: lib64
+        hostPath:
+          path: /lib64
+      - name: host-proc
+        hostPath:
+          path: /proc
+      # Mount the directory containing kubeconfig
+      - name: kubeconfig
+        hostPath:
+          path: /var/lib/kubelet
+          type: DirectoryOrCreate
