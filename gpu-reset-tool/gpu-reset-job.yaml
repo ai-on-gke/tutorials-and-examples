@@ -182,6 +182,8 @@ spec:
           echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
           echo "--- nvidia-smi ---"
           /usr/local/nvidia/bin/nvidia-smi || echo "nvidia-smi failed"
+          echo "--- VBIOS Info ---"
+          /usr/local/nvidia/bin/nvidia-smi -q | grep "VBIOS" || echo "Failed to get VBIOS info"
           echo "--- End Diagnostic Info ---"
           
           echo "--- PRE-RESET --- $(date)"
