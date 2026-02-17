@@ -183,7 +183,7 @@ spec:
           echo "--- nvidia-smi ---"
           /usr/local/nvidia/bin/nvidia-smi || echo "nvidia-smi failed"
           echo "--- VBIOS Info ---"
-          /usr/local/nvidia/bin/nvidia-smi -q | grep "VBIOS" || echo "Failed to get VBIOS info"
+          /usr/local/nvidia/bin/nvidia-smi --query-gpu=vbios_version,uuid --format=csv || echo "Failed to get VBIOS info"
           echo "--- End Diagnostic Info ---"
           
           echo "--- PRE-RESET --- $(date)"
