@@ -1,4 +1,3 @@
-
 # Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -242,7 +241,7 @@ gcloud storage buckets add-iam-policy-binding gs://${GSBUCKET} \
   --role "roles/storage.objectUser"
 
 # Move python files to our bucket (nice if we want to play with code changes without building new images)
-gsutil cp ../torch/*.py gs://${GSBUCKET}
+gcloud storage cp ../torch/*.py gs://${GSBUCKET}
 
 echo "✅ Service permissions setup complete."
 echo "🎉 All tasks finished successfully!"
