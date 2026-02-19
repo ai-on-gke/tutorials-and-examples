@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-reset-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpu-reset-role
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch", "patch", "update"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["daemonsets"]
+  verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpu-reset-binding
+subjects:
+- kind: ServiceAccount
+  name: gpu-reset-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: gpu-reset-role
+  apiGroup: rbac.authorization.k8s.io
