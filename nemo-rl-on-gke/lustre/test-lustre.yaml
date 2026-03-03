@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-lustre-pod
+spec:
+  containers:
+  - name: my-app-container
+    image: ubuntu:latest # Or your application image
+    command: ["/bin/bash", "-c", "sleep infinity"] # Keep the pod running for testing
+    volumeMounts:
+    - mountPath: "/data" # Path inside the container where Lustre will be mounted
+      name: lustre-storage
+  volumes:
+  - name: lustre-storage
+    persistentVolumeClaim:
+      claimName: lustre-pvc
