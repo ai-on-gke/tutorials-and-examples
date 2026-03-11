@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: genai-perf-client
+spec:
+  imagePullSecrets:
+    - name: ngc-secret
+  containers:
+
+  - name: perf-client-container
+    image: nvcr.io/nvidia/vllm:25.09-py3
+    env:
+      - name: HF_TOKEN
+        value: "<your-token>"
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+           pip install genai-perf && \
+           genai-perf profile --endpoint-type completions -m "gemma3-1b-instruct-lora_vhf-squad-v1" --streaming --concurrency 1 --url  nim-gemma-3-1b-lora-service:8000 --tokenizer="google/gemma-3-1b-pt" && \
+           genai-perf profile --endpoint-type completions -m "google/gemma-3-1b-pt" --streaming --concurrency 1 --url  nim-gemma-3-1b-lora-service:8000 --tokenizer="google/gemma-3-1b-pt"
