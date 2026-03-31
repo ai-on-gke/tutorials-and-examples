@@ -21,13 +21,12 @@ project_id      = "<YOUR_PROJECT_ID>"
 location        = "<CLUSTER_LOCATION>"
 runner_zone     = "<LINKED_RUNNER_ZONE>"
 cluster_name    = "<CLUSTER_NAME>"
-cluster_version = "<CLUSTER_VERSION>"       # 1.34.1-gke.2811000 or later
+cluster_version = "<CLUSTER_VERSION>"       # 1.35.3-gke.1083000 or later
 
 # Linked runner setup
 runner_sa              = "<RUNNER_SA>"                # e.g. "linked-runner-sa"
-cgke_image_name        = "<IMAGE_NAME>"               # e.g. "cos-confidential-gke-251101"
-cgke_image_project     = "<IMAGE_PROJECT>"            # e.g. "confidential-gke-images"
 tee_policy             = "<TEE_POLICY_STRING>"        # Fill in encoded policy
+security_mode          = "<SECURITY_MODE>"            # Fill in  with HARDENED, DEBUG, or NONE
 reservation_project_id = "<RESERVATION_PROJECT_ID>"   # Fill in for TPU reservation
 reservation_name       = "<RESERVATION_NAME>"         # Fill in for TPU reservation
 

@@ -18,7 +18,7 @@ terraform {
   required_providers {
     google-private = {
       source = "google.com/providers/google-private"
-      version = "0.0.251208"   # Match the `google-private` provider version
+      version = "0.0.260313"   # Match the `google-private` provider version
     }
   }
 }
@@ -29,13 +29,17 @@ provider "google-private" {
 }
 
 resource "google_container_cluster" "cgke_cluster" {
-  provider = google-private  # Can use public "google" provider for GKE clusters
+  provider = google-private
 
   project  = var.project_id
   location = var.location
   name     = var.cluster_name
 
   initial_node_count = 1
+
+  linked_runners_config {
+    mode = "STANDARD"
+  }
 
   node_config {
     machine_type = "e2-medium"
@@ -120,18 +124,13 @@ resource "google_container_node_pool" "cpu_linked_pool" {
       "https://www.googleapis.com/auth/cloud-platform"
     ]
 
-    image_type = "CUSTOM_CONTAINERD"
-    node_image_config {
-      image         = var.cgke_image_name
-      image_project = var.cgke_image_project
-    }
-
     runner_pool_config {
       control_node_pool = google_container_node_pool.cpu_control_pool.name
 	    attestation {
         mode       = "ENABLED"
         tee_policy = var.tee_policy
       }
+      security_mode = var.security_mode
     }
   }
 
