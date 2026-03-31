@@ -37,7 +37,7 @@ variable "cluster_name" {
 variable "cluster_version" {
   description = "Kubernetes version to use for the GKE cluster"
   type        = string
-  default     = "1.34.1-gke.2811000"
+  default     = "1.35.3-gke.1083000"
 }
 
 variable "runner_sa" {
@@ -45,22 +45,16 @@ variable "runner_sa" {
   type        = string
 }
 
-variable "cgke_image_name" {
-  description = "Linked runner COS image name"
-  type        = string
-  default     = "cos-confidential-gke-251101"
-}
-
-variable "cgke_image_project" {
-  description = "Linked runner COS image project"
-  type        = string
-  default     = "confidential-gke-images"
-}
-
 variable "tee_policy" {
   description = "Encoded TEE policy to use for the linked runner node pool"
   type        = string
   default     = ""
+}
+
+variable "security_mode" {
+  description = "Security mode of the runner node pool OS image"
+  type        = string
+  default     = "HARDENED"
 }
 
 # For TPU reservation 
