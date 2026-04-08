@@ -1,0 +1,49 @@
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: sysbench-sandbox-{{.Index}}
+  labels:
+    environment: benchmark-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        environment: benchmark-sandbox
+    spec:
+      restartPolicy: Never
+      runtimeClassName: gvisor
+      tolerations:
+      - key: "kubernetes.io/arch"
+        operator: "Equal"
+        value: "arm64"
+        effect: "NoSchedule"
+      - key: "sandbox.gke.io/runtime"
+        operator: "Equal"
+        value: "gvisor"
+        effect: "NoSchedule"
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+      - name: sysbench
+        image: us-central1-docker.pkg.dev/akvelon-gke-aieco/agent-sandbox/sysbench:dev3
+        command:
+        - /bin/sh
+        - -c
+        - "sysbench memory --memory-total-size=360G --memory-block-size=4K --memory-oper=write --memory-access-mode=rnd --threads=1 --events=50000000 --time=0 run"
+        resources:
+          requests:
+            memory: "150Mi"
+            cpu: "1000m"
+          limits:
+            memory: "150Mi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: podinfo
+          mountPath: /etc/podinfo
+      volumes:
+      - name: podinfo
+        downwardAPI:
+          items:
+          - path: "labels"
+            fieldRef:
+              fieldPath: metadata.labels

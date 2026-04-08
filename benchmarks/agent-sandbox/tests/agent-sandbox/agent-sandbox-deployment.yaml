@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{.Name}}
+  labels:
+    app: agent-sandbox
+    component: worker
+spec:
+  replicas: {{.Replicas}}
+  selector:
+    matchLabels:
+      app: agent-sandbox
+  template:
+    metadata:
+      labels:
+        app: agent-sandbox
+    spec:
+      containers:
+      - name: agent
+        image: busybox # Simulating a lightweight sandbox agent
+        command: ["sh", "-c", "while true; do echo 'Agent heartbeat'; sleep 30; done"]
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 400m
+            memory: 512Mi

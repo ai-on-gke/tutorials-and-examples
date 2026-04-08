@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-streamer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-runai
+  template:
+    metadata:
+      labels:
+        app: vllm-runai
+    spec:
+      containers:
+      - name: inference-server
+        image: "" 
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+        resources:  # Set resource requests and linits according to your requirements 
+          requests:
+            # cpu: "2"
+            # memory: "10Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            # cpu: "2"
+            # memory: "10Gi"
+            nvidia.com/gpu: "1"
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        - "--host=0.0.0.0"
+        - "--port=8000"
+        # --- RUN:AI MODEL STREAMER CONFIGURATION ---
+        - "--load-format=runai_streamer"
+        - "--model-loader-extra-config={\"concurrency\":16, \"distributed\":true}"
+        # -------------------------------------------
+        - "--trust-remote-code"
+        - --max-model-len=4096
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      tolerations: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+spec:
+  selector:
+    app: vllm-runai
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP

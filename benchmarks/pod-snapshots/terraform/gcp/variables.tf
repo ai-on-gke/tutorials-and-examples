@@ -1,0 +1,54 @@
+variable "project_id" {
+  type=string
+}
+
+variable "name_prefix" {
+  type = string
+}
+
+variable "hf_token" {
+  type = string
+  sensitive = true
+}
+
+
+variable "region" {
+  type=string
+}
+variable "availability_zone" {
+  type=string
+}
+
+variable "node_pools" {
+  type=map(object({
+    machine_type = string
+    min_count    = number
+    max_count    = number
+    gpu_enabled = optional(bool, false)
+    accelerator_type = optional(string)
+    accelerator_count  = optional(number)
+    gvisor_enabled = optional(bool, false)
+  }))
+}
+
+variable "models_to_download" {
+  type=map(object({
+    name=string
+  }))
+}
+
+variable "model_used_in_test" {
+  type=string
+}
+
+variable "public_images_to_pull" {
+  type=map(object({
+    source_registry = string
+    source_repository = string
+    tag = string
+  }))
+}
+
+variable "image_used_in_test" {
+  type=string
+}

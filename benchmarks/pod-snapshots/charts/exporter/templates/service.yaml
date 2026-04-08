@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "exporter.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ include "exporter.name" . }}
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ .Values.service.port }}
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    app: {{ include "exporter.name" . }}

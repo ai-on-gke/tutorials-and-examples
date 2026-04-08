@@ -1,0 +1,22 @@
+image:
+  imageName: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+namespace: ""
+
+service:
+  port: 8080
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+serviceAccount:
+  create: true
+  name: scaletimer

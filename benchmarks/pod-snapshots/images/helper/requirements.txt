@@ -1,0 +1,6 @@
+google-cloud-storage~=3.10.1
+boto3~=1.42.83
+botocore~=1.42.83
+azure-identity~=1.25.3
+azure-storage-blob~=12.28.0
+huggingface_hub~=1.9.0
