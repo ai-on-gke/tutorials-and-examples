@@ -1,0 +1,85 @@
+name: sandbox-latency-test
+namespace:
+  number: 1
+
+tuningSets:
+- name: CreateRate10qps
+  qpsLoad:
+    qps: 10
+
+steps:
+- name: Start Latency Measurement
+  measurements:
+  - Identifier: ClaimToPodLatency
+    Method: PodStartupLatency
+    Params:
+      action: start
+      labelSelector: environment=benchmark-sandbox
+      threshold: 60s
+  - Identifier: ClaimTimer
+    Method: Timer
+    Params:
+      action: start
+      label: overall execution
+  - Identifier: ClaimThroughput
+    Method: SchedulingThroughput
+    Params:
+      action: start
+      labelSelector: environment=benchmark-sandbox
+  - Identifier: ResourceUsage
+    Method: ResourceUsageSummary
+    Params:
+      action: start
+
+- name: Steady State Test
+  phases:
+  - name: CreateClaims
+    namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 96
+    tuningSet: CreateRate10qps
+    objectBundle:
+    - basename: sysbench-sandbox
+      objectTemplatePath: sandbox-cr.yaml
+
+- name: Wait for Sandboxes
+  measurements:
+  - Identifier: WaitForSandboxes
+    Method: WaitForGenericK8sObjects
+    Params:
+      action: start
+      objectGroup: extensions.agents.x-k8s.io
+      objectVersion: v1alpha1
+      objectResource: sandboxclaims
+      namespaceRange: {min: 1, max: 1}
+      successfulConditions: ["Ready=True"]
+      failedConditions: []
+      minDesiredObjectCount: 200
+      maxFailedObjectCount: 0
+      timeout: 5m
+      refreshInterval: 2000ms
+
+- name: Stop Timer
+  measurements:
+  - Identifier: ClaimTimer
+    Method: Timer
+    Params:
+      action: stop
+      label: overall execution
+
+- name: Gather Results
+  measurements:
+  - Identifier: ClaimToPodLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather
+  - Identifier: ClaimTimer
+    Method: Timer
+    Params:
+      action: gather
+      label: overall execution
+  - Identifier: ClaimThroughput
+    Method: SchedulingThroughput
+    Params: {action: gather}
+  - Identifier: ResourceUsage
+    Method: ResourceUsageSummary
+    Params: {action: gather}

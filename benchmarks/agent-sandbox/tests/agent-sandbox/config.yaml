@@ -1,0 +1,40 @@
+name: agent-sandbox-burst-test
+namespace:
+  number: 5
+
+tuningSets:
+- name: BurstTenEveryFiveSeconds
+  steppedLoad:
+    burstSize: 10
+    stepDelay: 10s
+
+steps:
+- name: "Initialize Monitoring"
+  measurements:
+  - Identifier: AgentStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: start
+      labelSelector: app=agent-sandbox
+      # CL2 uses a default 5s threshold. We must override it HERE.
+      threshold: 15s
+
+- name: "Burst Deploy Agents"
+  phases:
+  - namespaceRange:
+      min: 1
+      max: 5
+    replicasPerNamespace: 10
+    tuningSet: BurstTenEveryFiveSeconds
+    objectBundle:
+    - basename: agent-sandbox-deployment
+      objectTemplatePath: "agent-sandbox-deployment.yaml"
+      templateFillMap:
+        Replicas: 50
+
+- name: "Final Results"
+  measurements:
+  - Identifier: AgentStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather
