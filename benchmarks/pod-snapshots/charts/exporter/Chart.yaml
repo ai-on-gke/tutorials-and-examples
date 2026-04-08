@@ -1,0 +1,6 @@
+apiVersion: v2
+name: exporter
+description: Monitors pod startup time
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

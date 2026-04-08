@@ -1,0 +1,10 @@
+apiVersion: podsnapshot.gke.io/v1alpha1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: ps-storage
+  namespace: default
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: ""
+      path: "vllm"    

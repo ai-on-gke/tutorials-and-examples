@@ -1,0 +1,13 @@
+apiVersion: podsnapshot.gke.io/v1alpha1
+kind: PodSnapshotPolicy
+metadata:
+  name: ps-policy
+  namespace: default
+spec:
+  storageConfigName: ps-storage
+  selector:
+    matchLabels:
+      app: vllm-pod-snapshots
+  triggerConfig:
+    type: manual
+    postCheckpoint: resume
