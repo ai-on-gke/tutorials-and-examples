@@ -1,0 +1,317 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# No cluster resource in this example's terraform (providers.tf reads the
+# cluster back via a `data "google_container_cluster"`, same shape as
+# lora-inference-gateway's SETUP.md), so the cluster is created directly with
+# gcloud, matching the lora-inference-gateway pipeline shape.
+#
+# Unlike lora-inference-gateway, this terraform's own `inference_gateway`
+# module (from common-infra) installs the Gateway API / inference extension
+# CRDs itself via its kubernetes/helm providers - so, unlike
+# lora-inference-gateway, the cluster is NOT created with
+# `--enable-inference-gateway`. This is inferred from the module's inputs
+# (it takes its own crds_version), not verified against a live run.
+#
+# Uses nvidia-tesla-a100 (a2-highgpu-1g), matching the example's own
+# nodeSelector - same cost/quota consideration already flagged for
+# lora-inference-gateway and mlflow.
+#
+# CAVEAT: assumes the Model Armor API is already enabled on the CI project
+# (google_model_armor_template is a real, billed GCP resource in the
+# us-central1 region) - not verified from this environment.
+#
+# The test proves Model Armor's scoping actually works: a jailbreak prompt is
+# sent to both the unprotected base model (expected to pass through) and the
+# "food-review" model that gcp_traffic_extension_model_armor_settings
+# actually attaches Model Armor to (expected to be blocked with the
+# custom_prompt_safety_error_code configured in example.tfvars, 403).
+
+steps:
+- id: "model-armor: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/security/model-armor/tests /workspace/security/model-armor/tests
+
+- id: 'model-armor: create gke cluster'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/model_armor_gke_cluster_result.txt
+    gcloud container clusters create ml-model-armor-$SHORT_SHA-$_BUILD_ID \
+      --region=$_MODEL_ARMOR_REGION \
+      --release-channel=rapid \
+      --num-nodes=1 \
+      --machine-type=e2-standard-4 \
+      --project=$PROJECT_ID
+    gcloud container node-pools create gpu-pool \
+      --cluster=ml-model-armor-$SHORT_SHA-$_BUILD_ID \
+      --region=$_MODEL_ARMOR_REGION \
+      --machine-type=a2-highgpu-1g \
+      --accelerator=type=nvidia-tesla-a100,count=1,gpu-driver-version=DEFAULT \
+      --num-nodes=1 \
+      --project=$PROJECT_ID
+    echo "pass" > /workspace/model_armor_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ["model-armor: prepare tests"]
+
+- id: 'model-armor: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-model-armor-${SHORT_SHA}-${_BUILD_ID}'
+  - '--region=${_MODEL_ARMOR_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['model-armor: create gke cluster']
+
+- id: "model-armor: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/security/model-armor/terraform"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["model-armor: prepare tests"]
+
+- id: 'model-armor: apply gateway terraform'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/security/model-armor/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/model_armor_apply_result.txt
+    terraform apply \
+    -var-file=example.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=ml-model-armor-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_MODEL_ARMOR_REGION \
+    -var=ip_address_name=ml-model-armor-$SHORT_SHA-$_BUILD_ID \
+    -auto-approve -no-color
+    echo "pass" > /workspace/model_armor_apply_result.txt
+  allowFailure: true
+  waitFor: ['model-armor: validate platform', 'model-armor: generate kubeconfig']
+
+- id: "model-armor: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/security/model-armor"
+  secretEnv: ["HF_TOKEN"]
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/model_armor_test_guide.txt
+
+    kubectl create secret generic hf-token \
+        --from-literal=token=$$HF_TOKEN \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl apply -f vllm-sample/vllm-llama3-8b-instruct.yaml
+    kubectl rollout status deployment/vllm-llama3-8b-instruct --timeout=900s
+
+    GATEWAY_NAME="model-armor-tutorial-gateway"
+    GATEWAY_IP=$(kubectl get gateway $$GATEWAY_NAME -o jsonpath='{.status.addresses[0].value}' 2>/dev/null)
+    n=0
+    while [ -z "$$GATEWAY_IP" ] && [ $n -lt 60 ]; do
+      echo "Waiting for Gateway IP..."
+      sleep 10
+      GATEWAY_IP=$(kubectl get gateway $$GATEWAY_NAME -o jsonpath='{.status.addresses[0].value}' 2>/dev/null)
+      n=$((n+1))
+    done
+    if [ -z "$$GATEWAY_IP" ]; then
+      echo "Gateway never got an address."
+      exit 1
+    fi
+    echo "Gateway IP: $$GATEWAY_IP"
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+    python3 /workspace/security/model-armor/tests/test.py "$$GATEWAY_IP"
+
+    echo "pass" > /workspace/model_armor_test_guide.txt
+  allowFailure: true
+  waitFor: ['model-armor: apply gateway terraform']
+
+- id: 'model-armor: cleanup gateway terraform'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/security/model-armor/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/model_armor_cleanup_terraform_result.txt
+    terraform destroy \
+    -var-file=example.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=ml-model-armor-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_MODEL_ARMOR_REGION \
+    -var=ip_address_name=ml-model-armor-$SHORT_SHA-$_BUILD_ID \
+    -auto-approve -no-color
+    echo "pass" > /workspace/model_armor_cleanup_terraform_result.txt
+  allowFailure: true
+  waitFor: ['model-armor: test guide']
+
+- id: 'model-armor: cleanup gke cluster'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/model_armor_cleanup_cluster_result.txt
+    gcloud container clusters delete ml-model-armor-$SHORT_SHA-$_BUILD_ID \
+      --region=$_MODEL_ARMOR_REGION \
+      --project=$PROJECT_ID \
+      --quiet
+    echo "pass" > /workspace/model_armor_cleanup_cluster_result.txt
+  allowFailure: true
+  waitFor: ['model-armor: cleanup gateway terraform']
+
+- id: 'model-armor: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "model-armor") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/model_armor_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* model-armor gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/model_armor_apply_result.txt) != "pass" ]]; then
+      failed_steps+="* model-armor gateway terraform apply failed\n"
+    fi
+
+    if [[ $(cat /workspace/model_armor_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* model-armor test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/model_armor_cleanup_terraform_result.txt) != "pass" ]]; then
+      failed_steps+="* model-armor gateway terraform cleanup failed\n"
+    fi
+
+    if [[ $(cat /workspace/model_armor_cleanup_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* model-armor gke cluster cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Model Armor CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "model-armor", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['model-armor: cleanup gke cluster']
+
+- id: 'model-armor: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in model_armor_gke_cluster_result model_armor_apply_result model_armor_test_guide model_armor_cleanup_terraform_result model_armor_cleanup_cluster_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['model-armor: create github issue']
+
+substitutions:
+  _MODEL_ARMOR_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
+    env: "HF_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

@@ -1,0 +1,334 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Scope: this runs FinetuneFlow via `python finetune_gemma.py run`, which
+# orchestrates directly against the Kubernetes API and doesn't need Argo
+# Workflows (that's only required for `argo-workflows create`, used for
+# scheduled/triggered runs - out of scope for a functional test). The
+# terraform still provisions Argo per the tutorial, it's just not exercised
+# here. Also skips serve_model/ - deploying the fine-tuned model needs a
+# manually-created ConfigMap pointing at wherever the user's HF username
+# pushed the model, and doubles the GPU footprint; the interesting, testable
+# claim ("did the Metaflow pipeline actually fine-tune and publish a model")
+# is already covered by the Hugging Face Hub check.
+#
+# CAVEAT: this pipeline's env var wiring for a self-hosted Metaflow
+# deployment (METAFLOW_SERVICE_URL, METAFLOW_DATASTORE_SYSROOT_GS, etc.)
+# follows Metaflow's documented configuration conventions but was not
+# testable end-to-end from this environment - flagging it as the most
+# speculative piece of this batch of changes.
+#
+# Also note: image_registry.tf hardcodes the Artifact Registry repo name
+# ("metaflow-tutorial-tf") rather than deriving it from a per-build unique
+# value like the rest of this example's resources. Terraform destroy in the
+# cleanup step removes it after a normal run, but if a run ever aborts before
+# cleanup, a subsequent run could hit a "repository already exists" error.
+# Not fixed here since it's a pre-existing property of the example's own
+# terraform, not something this pipeline introduced.
+
+steps:
+- id: "metaflow: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/metaflow/tests /workspace/metaflow/tests
+
+      # image_registry.tf hardcodes the AR repo name (metaflow-tutorial-tf)
+      # instead of deriving a per-build unique one, so a repo left behind by
+      # a run that aborted before its own terraform destroy would collide
+      # with the next run's apply. Best-effort delete any leftover repo.
+      gcloud artifacts repositories delete metaflow-tutorial-tf \
+        --location=us \
+        --project=$PROJECT_ID \
+        --quiet || true
+
+- id: "metaflow: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/metaflow/terraform"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["metaflow: prepare tests"]
+
+- id: 'metaflow: create gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/metaflow/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/metaflow_gke_cluster_result.txt
+    terraform apply \
+    -var-file=default_env.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=default_resource_name=ml-metaflow-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_METAFLOW_REGION \
+    -var=subnetwork_region=$_METAFLOW_REGION \
+    -var=metaflow_cloudsql_instance_region=$_METAFLOW_REGION \
+    -auto-approve -no-color
+    echo "pass" > /workspace/metaflow_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ['metaflow: validate platform']
+
+- id: 'metaflow: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-metaflow-${SHORT_SHA}-${_BUILD_ID}'
+  - '--region=${_METAFLOW_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['metaflow: create gke cluster']
+
+- id: 'metaflow: build finetune image'
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/metaflow/finetune_inside_metaflow/image"
+  args:
+  - 'builds'
+  - 'submit'
+  - '--tag'
+  - us-docker.pkg.dev/${PROJECT_ID}/metaflow-tutorial-tf/finetune:latest
+  - '.'
+  allowFailure: true
+  waitFor: ['metaflow: create gke cluster']
+
+- id: 'metaflow: deploy metadata service'
+  name: "gcr.io/cloud-builders/kubectl"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/metaflow_deploy_metadata_result.txt
+
+    kubectl apply -f /workspace/metaflow/gen/metaflow-metadata.yaml
+    kubectl apply -f /workspace/metaflow/gen/metaflow-ui.yaml
+    kubectl rollout status deployment/metaflow-metadata --timeout=300s
+
+    echo "pass" > /workspace/metaflow_deploy_metadata_result.txt
+  allowFailure: true
+  waitFor: ['metaflow: generate kubeconfig']
+
+- id: 'metaflow: run finetune flow'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/metaflow/finetune_inside_metaflow"
+  secretEnv: ["HF_TOKEN"]
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/metaflow_run_result.txt
+
+    NEW_MODEL="finetunned-gemma2-9b-ci-$SHORT_SHA-$_BUILD_ID"
+    echo "$$NEW_MODEL" > /workspace/metaflow_new_model.txt
+
+    kubectl create secret generic hf-token \
+      --from-literal=HF_TOKEN=$$HF_TOKEN \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    # Reduce the dataset size so the finetune step finishes in minutes rather
+    # than the tutorial's default full-scale run, and use a build-unique
+    # model name so runs don't clobber each other's HF Hub repo.
+    sed -e "s/\"DATASET_LIMIT\": \"1000\",/\"DATASET_LIMIT\": \"50\",/" \
+        -e "s/new_model=\"finetunned-gemma2-9b\"/new_model=\"$${NEW_MODEL}\"/" \
+        finetune_gemma.py > /workspace/finetune_gemma_ci.py
+
+    kubectl port-forward svc/metaflow-metadata-svc 8080:8080 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install metaflow google-cloud-storage kubernetes
+
+    export METAFLOW_DEFAULT_DATASTORE=gs
+    export METAFLOW_DATASTORE_SYSROOT_GS=gs://ml-metaflow-$SHORT_SHA-$_BUILD_ID/metaflow
+    export METAFLOW_DEFAULT_METADATA=service
+    export METAFLOW_SERVICE_URL=http://localhost:8080/
+    export METAFLOW_KUBERNETES_NAMESPACE=default
+    export METAFLOW_KUBERNETES_SERVICE_ACCOUNT=metaflow-tutorial-sa
+
+    python3 /workspace/finetune_gemma_ci.py run
+
+    echo "pass" > /workspace/metaflow_run_result.txt
+  allowFailure: true
+  waitFor: ['metaflow: deploy metadata service', 'metaflow: build finetune image']
+
+- id: 'metaflow: test guide'
+  name: "gcr.io/cloud-builders/gcloud"
+  secretEnv: ["HF_TOKEN"]
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/metaflow_test_guide.txt
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install huggingface_hub
+
+    NEW_MODEL=$(cat /workspace/metaflow_new_model.txt)
+    python3 /workspace/metaflow/tests/test.py "$$NEW_MODEL" "$$HF_TOKEN"
+
+    echo "pass" > /workspace/metaflow_test_guide.txt
+  allowFailure: true
+  waitFor: ['metaflow: run finetune flow']
+
+- id: 'metaflow: cleanup gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/metaflow/terraform"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/metaflow_cleanup_result.txt
+    terraform destroy \
+    -var-file=default_env.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=default_resource_name=ml-metaflow-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_METAFLOW_REGION \
+    -var=subnetwork_region=$_METAFLOW_REGION \
+    -var=metaflow_cloudsql_instance_region=$_METAFLOW_REGION \
+    -auto-approve -no-color
+    echo "pass" > /workspace/metaflow_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['metaflow: test guide']
+
+- id: 'metaflow: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "metaflow") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/metaflow_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* metaflow gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/metaflow_deploy_metadata_result.txt) != "pass" ]]; then
+      failed_steps+="* metaflow metadata service deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/metaflow_run_result.txt) != "pass" ]]; then
+      failed_steps+="* metaflow FinetuneFlow run failed (check METAFLOW_* env wiring)\n"
+    fi
+
+    if [[ $(cat /workspace/metaflow_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* metaflow test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/metaflow_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* metaflow gke cluster cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Metaflow CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "metaflow", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['metaflow: cleanup gke cluster']
+
+- id: 'metaflow: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in metaflow_gke_cluster_result metaflow_deploy_metadata_result metaflow_run_result metaflow_test_guide metaflow_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['metaflow: create github issue']
+
+substitutions:
+  _METAFLOW_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
+    env: "HF_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

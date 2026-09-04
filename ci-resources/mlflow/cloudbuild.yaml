@@ -1,0 +1,411 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Two-stage pipeline matching the tutorial: finetune (logs the model to
+# MLflow, not the Hugging Face Hub - no write-scoped token needed here,
+# unlike finetuning-gemma-3-1b-it-on-l4/metaflow) -> look up the run_id via
+# the MLflow REST API -> deploy that exact run's model -> curl /predict.
+#
+# CAVEAT: the MLflow tracking server is installed via the community-charts/
+# mlflow Helm chart, inferred from mlflow-configuration/values.yaml's
+# artifactRoot.gcs schema matching that chart's documented values - not
+# verified against a live cluster.
+#
+# Uses nvidia-tesla-a100 (a2-highgpu-1g) for both finetuning and serving,
+# matching the example's own manifests - same cost/quota consideration
+# already flagged for lora-inference-gateway.
+
+steps:
+- id: "mlflow: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/mlflow/tests /workspace/mlflow/finetune-gemma/tests
+
+- id: "mlflow: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/mlflow/finetune-gemma/terraform-gke-cluster"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["mlflow: prepare tests"]
+
+- id: 'mlflow: create gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/mlflow/finetune-gemma/terraform-gke-cluster"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/mlflow_gke_cluster_result.txt
+    PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+
+    terraform apply \
+    -var-file=example_environment.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=project_number=$PROJECT_NUMBER \
+    -var=cluster_name=ml-mlflow-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_MLFLOW_REGION \
+    -var=gcs_bucket=ml-mlflow-$SHORT_SHA-$_BUILD_ID \
+    -auto-approve -no-color
+    echo "pass" > /workspace/mlflow_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ['mlflow: validate platform']
+
+- id: 'mlflow: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-mlflow-${SHORT_SHA}-${_BUILD_ID}'
+  - '--region=${_MLFLOW_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['mlflow: create gke cluster']
+
+- id: 'mlflow: build finetune image'
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/mlflow/finetune-gemma/finetune"
+  args:
+  - 'builds'
+  - 'submit'
+  - '--tag'
+  - us-docker.pkg.dev/${PROJECT_ID}/gemma/finetune-gemma-mlflow:ci-${SHORT_SHA}-${_BUILD_ID}
+  - '.'
+  allowFailure: true
+  waitFor: ['mlflow: create gke cluster']
+
+- id: 'mlflow: build deploy image'
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/mlflow/finetune-gemma/deploy-gemma2/simple"
+  args:
+  - 'builds'
+  - 'submit'
+  - '--tag'
+  - us-docker.pkg.dev/${PROJECT_ID}/gemma/deploy-gemma-mlflow:ci-${SHORT_SHA}-${_BUILD_ID}
+  - '.'
+  allowFailure: true
+  waitFor: ['mlflow: create gke cluster']
+
+- id: 'mlflow: deploy tracking server'
+  name: "gcr.io/${PROJECT_ID}/helm"
+  dir: "/workspace/mlflow/finetune-gemma"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/mlflow_deploy_tracking_result.txt
+
+    sed 's/<BUCKET_NAME>/ml-mlflow-'"$SHORT_SHA"'-'"$_BUILD_ID"'/' \
+      mlflow-configuration/values.yaml > /workspace/mlflow-values-rendered.yaml
+
+    helm install mlflow community-charts/mlflow -f /workspace/mlflow-values-rendered.yaml --wait --timeout 10m
+
+    echo "pass" > /workspace/mlflow_deploy_tracking_result.txt
+  env:
+  - "CLOUDSDK_COMPUTE_REGION=${_MLFLOW_REGION}"
+  - "CLOUDSDK_CONTAINER_CLUSTER=ml-mlflow-${SHORT_SHA}-${_BUILD_ID}"
+  - "HELM_REPO_NAME=community-charts"
+  - "HELM_REPO_URL=https://community-charts.github.io/helm-charts"
+  allowFailure: true
+  waitFor: ['mlflow: generate kubeconfig']
+
+- id: 'mlflow: run finetune job'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/mlflow/finetune-gemma"
+  secretEnv: ["HF_TOKEN"]
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/mlflow_finetune_result.txt
+
+    kubectl create secret generic hf-secret \
+      --from-literal=hf_api_token=$$HF_TOKEN \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    NEW_MODEL="gemma-2-9b-sql-finetuned-ci-$SHORT_SHA-$_BUILD_ID"
+    echo "$$NEW_MODEL" > /workspace/mlflow_new_model.txt
+
+    cat > /workspace/render_finetune_job.py << 'PYEOF'
+    import os
+    import yaml
+    image = os.environ["IMAGE_VALUE"]
+    bucket = os.environ["BUCKET_VALUE"]
+    new_model = os.environ["NEW_MODEL_VALUE"]
+
+    with open("finetune/finetune.yaml") as f:
+        data = yaml.safe_load(f)
+
+    container = data["spec"]["template"]["spec"]["containers"][0]
+    container["image"] = image
+
+    env_overrides = {
+        "MLFLOW_ARTIFACT_URI": f"gs://{bucket}",
+        "NEW_MODEL": new_model,
+        "NUM_TRAIN_EPOCHS": "1",
+        "DATASET_LIMIT": "50",
+    }
+    for env_entry in container["env"]:
+        if env_entry["name"] in env_overrides:
+            env_entry["value"] = env_overrides.pop(env_entry["name"])
+    assert not env_overrides, f"Expected env vars not found in finetune.yaml: {env_overrides}"
+
+    with open("/workspace/finetune-job-rendered.yaml", "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+    PYEOF
+
+    apt update
+    apt install python3 python3-yaml --assume-yes
+    IMAGE_VALUE="us-docker.pkg.dev/${PROJECT_ID}/gemma/finetune-gemma-mlflow:ci-${SHORT_SHA}-${_BUILD_ID}" \
+    BUCKET_VALUE="ml-mlflow-$SHORT_SHA-$_BUILD_ID" \
+    NEW_MODEL_VALUE="$$NEW_MODEL" \
+    python3 /workspace/render_finetune_job.py
+
+    kubectl apply -f /workspace/finetune-job-rendered.yaml
+    kubectl wait --for=condition=complete job/finetune-job-mlflow --timeout=1800s
+
+    echo "pass" > /workspace/mlflow_finetune_result.txt
+  allowFailure: true
+  waitFor: ['mlflow: deploy tracking server', 'mlflow: build finetune image']
+
+- id: 'mlflow: find run and deploy'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/mlflow/finetune-gemma"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/mlflow_deploy_model_result.txt
+
+    kubectl port-forward svc/mlflow 5000:5000 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests pyyaml
+
+    RUN_ID=$(python3 tests/find_run.py http://127.0.0.1:5000 gemma2-9b-finetuning-1)
+    echo "Found run: $$RUN_ID"
+    echo "$$RUN_ID" > /workspace/mlflow_run_id.txt
+
+    cat > /workspace/render_deploy.py << 'PYEOF'
+    import os
+    import yaml
+    image = os.environ["IMAGE_VALUE"]
+    bucket = os.environ["BUCKET_VALUE"]
+    run_id = os.environ["RUN_ID_VALUE"]
+
+    with open("deploy-gemma2/simple/deploy.yaml") as f:
+        docs = list(yaml.safe_load_all(f))
+
+    deployment = docs[0]
+    assert deployment["kind"] == "Deployment"
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    container["image"] = image
+    for env_entry in container["env"]:
+        if env_entry["name"] == "MODEL_PATH":
+            env_entry["value"] = f"/data/{run_id}/artifacts/model/"
+    deployment["spec"]["template"]["spec"]["volumes"][0]["csi"]["volumeAttributes"]["bucketName"] = bucket
+
+    with open("/workspace/deploy-rendered.yaml", "w") as f:
+        yaml.dump_all(docs, f, default_flow_style=False, sort_keys=False)
+    PYEOF
+
+    IMAGE_VALUE="us-docker.pkg.dev/${PROJECT_ID}/gemma/deploy-gemma-mlflow:ci-${SHORT_SHA}-${_BUILD_ID}" \
+    BUCKET_VALUE="ml-mlflow-$SHORT_SHA-$_BUILD_ID" \
+    RUN_ID_VALUE="$$RUN_ID" \
+    python3 /workspace/render_deploy.py
+
+    kubectl apply -f /workspace/deploy-rendered.yaml
+    kubectl rollout status deployment/gemma2-9b-finetuned --timeout=900s
+
+    echo "pass" > /workspace/mlflow_deploy_model_result.txt
+  allowFailure: true
+  waitFor: ['mlflow: run finetune job', 'mlflow: build deploy image']
+
+- id: 'mlflow: test guide'
+  name: "gcr.io/cloud-builders/kubectl"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/mlflow_test_guide.txt
+
+    kubectl port-forward svc/gemma2-9b-finetuned-service 11434:11434 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+    python3 /workspace/mlflow/finetune-gemma/tests/test.py http://127.0.0.1:11434
+
+    echo "pass" > /workspace/mlflow_test_guide.txt
+  allowFailure: true
+  waitFor: ['mlflow: find run and deploy']
+
+- id: 'mlflow: cleanup gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/mlflow/finetune-gemma/terraform-gke-cluster"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/mlflow_cleanup_result.txt
+    PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+    terraform destroy \
+    -var-file=example_environment.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=project_number=$PROJECT_NUMBER \
+    -var=cluster_name=ml-mlflow-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_MLFLOW_REGION \
+    -var=gcs_bucket=ml-mlflow-$SHORT_SHA-$_BUILD_ID \
+    -auto-approve -no-color
+    echo "pass" > /workspace/mlflow_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['mlflow: test guide']
+
+- id: 'mlflow: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "mlflow") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/mlflow_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* mlflow gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/mlflow_deploy_tracking_result.txt) != "pass" ]]; then
+      failed_steps+="* mlflow tracking server deployment failed (check the community-charts/mlflow chart assumption)\n"
+    fi
+
+    if [[ $(cat /workspace/mlflow_finetune_result.txt) != "pass" ]]; then
+      failed_steps+="* mlflow finetune job failed\n"
+    fi
+
+    if [[ $(cat /workspace/mlflow_deploy_model_result.txt) != "pass" ]]; then
+      failed_steps+="* mlflow model deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/mlflow_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* mlflow test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/mlflow_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* mlflow gke cluster cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="MLflow CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "mlflow", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['mlflow: cleanup gke cluster']
+
+- id: 'mlflow: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in mlflow_gke_cluster_result mlflow_deploy_tracking_result mlflow_finetune_result mlflow_deploy_model_result mlflow_test_guide mlflow_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['mlflow: create github issue']
+
+substitutions:
+  _MLFLOW_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
+    env: "HF_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

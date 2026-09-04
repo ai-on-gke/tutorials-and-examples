@@ -1,0 +1,399 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Uses the README's "Option #2: Download weights from HuggingFace" path with
+# Gemma-2b (smallest of the three documented model choices) instead of
+# Llama-2/3, since that reuses the org's existing cloudbuild-hf-token secret -
+# no new credential needed. checkpoint-job.yaml unconditionally mounts a
+# kaggle-secret volume regardless of which path you use, even though the
+# script never reads it for the HF/Gemma path, so this pipeline creates an
+# empty placeholder secret purely to satisfy that mount - not a real Kaggle
+# credential, and none is needed here.
+#
+# NOTE: --tokenizer_path for gemma below (.../third_party/gemma/tokenizer.model)
+# is inferred by following the exact naming convention the manifest already
+# uses for llama2 (.../third_party/llama2/tokenizer.model), not verified
+# against the actual jetstream-pytorch-server image contents - flagging this
+# the same way as the flyte gRPC port-name assumption in an earlier commit.
+#
+# Also reduced from the README's 2 TPU nodes / 2 server replicas to 1 of each,
+# since a single v5e host (8 chips) is enough to prove the pipeline works.
+
+steps:
+- id: "jetstream-pytorch: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/inference-servers/jetstream-pytorch/tests /workspace/inference-servers/jetstream/pytorch/single-host-inference/tests
+
+- id: 'jetstream-pytorch: create gke cluster'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/jspt_gke_cluster_result.txt
+    gcloud container clusters create ml-jspt-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_JETSTREAM_PYTORCH_ZONE \
+      --project=$PROJECT_ID \
+      --workload-pool=$PROJECT_ID.svc.id.goog \
+      --release-channel=rapid \
+      --addons=GcsFuseCsiDriver \
+      --num-nodes=2
+    gcloud container node-pools create tpu \
+      --cluster=ml-jspt-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_JETSTREAM_PYTORCH_ZONE \
+      --num-nodes=1 \
+      --machine-type=ct5lp-hightpu-8t \
+      --project=$PROJECT_ID
+    echo "pass" > /workspace/jspt_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ["jetstream-pytorch: prepare tests"]
+
+- id: 'jetstream-pytorch: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-jspt-${SHORT_SHA}-${_BUILD_ID}'
+  - '--zone=${_JETSTREAM_PYTORCH_ZONE}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['jetstream-pytorch: create gke cluster']
+
+- id: 'jetstream-pytorch: workload identity setup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jspt_workload_identity_result.txt
+
+    GSA_NAME="jspt-$SHORT_SHA-$_BUILD_ID"
+    echo "$$GSA_NAME" > /workspace/jspt_gsa_name.txt
+
+    gcloud storage buckets create gs://ml-jspt-$SHORT_SHA-$_BUILD_ID \
+      --project=$PROJECT_ID --location=$_JETSTREAM_PYTORCH_REGION
+
+    gcloud iam service-accounts create "$$GSA_NAME" --project=$PROJECT_ID
+
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:$${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      --role=roles/storage.objectUser --condition=None
+
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:$${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      --role=roles/storage.insightsCollectorService --condition=None
+
+    gcloud iam service-accounts add-iam-policy-binding \
+      "$${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      --project=$PROJECT_ID \
+      --role=roles/iam.workloadIdentityUser \
+      --member="serviceAccount:${PROJECT_ID}.svc.id.goog[default/default]"
+
+    kubectl annotate serviceaccount default \
+      --overwrite \
+      iam.gke.io/gcp-service-account="$${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+    echo "pass" > /workspace/jspt_workload_identity_result.txt
+  allowFailure: true
+  waitFor: ['jetstream-pytorch: generate kubeconfig']
+
+- id: 'jetstream-pytorch: run checkpoint conversion'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/inference-servers/jetstream/pytorch/single-host-inference"
+  secretEnv: ["HF_TOKEN"]
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jspt_checkpoint_result.txt
+
+    kubectl create secret generic huggingface-secret \
+      --from-literal=HUGGINGFACE_TOKEN=$$HF_TOKEN \
+      --dry-run=client -o yaml | kubectl apply -f -
+    # Placeholder only - the gemma-2b/HuggingFace conversion path never reads
+    # this, but the manifest mounts it unconditionally so the pod needs it to
+    # exist to schedule at all.
+    kubectl create secret generic kaggle-secret \
+      --from-literal=kaggle.json='{}' \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    # Edited as structured YAML (not raw text) so there's no risk of the
+    # nested YAML-in-bash-heredoc-in-YAML indentation getting corrupted.
+    cat > /workspace/render_checkpoint_job.py << 'PYEOF'
+    import os
+    import yaml
+    bucket_name = os.environ["BUCKET_NAME_VALUE"]
+    with open("checkpoint-job.yaml") as f:
+        data = yaml.safe_load(f)
+    data["spec"]["template"]["spec"]["containers"][0]["args"] = [
+        "-s=jetstream-pytorch",
+        "-m=google/gemma-2b-pytorch",
+        "-o=gs://BUCKET_NAME/pytorch/gemma-2b/final/bf16/",
+        "-n=gemma",
+        "-q=False",
+        "-h=True",
+    ]
+    rendered = yaml.dump(data, default_flow_style=False, sort_keys=False)
+    rendered = rendered.replace("BUCKET_NAME", bucket_name)
+    with open("/workspace/checkpoint-job-rendered.yaml", "w") as f:
+        f.write(rendered)
+    PYEOF
+
+    apt update
+    apt install python3 python3-yaml --assume-yes
+    BUCKET_NAME_VALUE="ml-jspt-$SHORT_SHA-$_BUILD_ID" python3 /workspace/render_checkpoint_job.py
+
+    kubectl apply -f /workspace/checkpoint-job-rendered.yaml
+    kubectl wait --for=condition=complete job/checkpoint-converter --timeout=1200s
+
+    echo "pass" > /workspace/jspt_checkpoint_result.txt
+  allowFailure: true
+  waitFor: ['jetstream-pytorch: workload identity setup']
+
+- id: 'jetstream-pytorch: deploy server'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/inference-servers/jetstream/pytorch/single-host-inference"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jspt_deploy_result.txt
+
+    # deployment.yaml is a multi-document file (Deployment + Service), and
+    # edited as structured YAML for the same reason as the checkpoint job.
+    cat > /workspace/render_deployment.py << 'PYEOF'
+    import os
+    import yaml
+    bucket_name = os.environ["BUCKET_NAME_VALUE"]
+    with open("deployment.yaml") as f:
+        docs = list(yaml.safe_load_all(f))
+
+    deployment = docs[0]
+    assert deployment["kind"] == "Deployment", f"expected first doc to be a Deployment, got {deployment.get('kind')}"
+    deployment["spec"]["replicas"] = 1
+
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    server_container = next(c for c in containers if c["name"] == "jetstream-pytorch-server")
+    server_container["args"] = [
+        "--size=2b",
+        "--model_name=gemma",
+        "--batch_size=80",
+        "--max_cache_length=2048",
+        "--quantize_weights=False",
+        "--quantize_kv_cache=False",
+        "--tokenizer_path=/jetstream-pytorch/jetstream_pt/third_party/gemma/tokenizer.model",
+        "--checkpoint_path=/models/pytorch/gemma-2b/final/bf16/model.safetensors",
+    ]
+
+    rendered = yaml.dump_all(docs, default_flow_style=False, sort_keys=False)
+    rendered = rendered.replace("BUCKET_NAME", bucket_name)
+    with open("/workspace/deployment-rendered.yaml", "w") as f:
+        f.write(rendered)
+    PYEOF
+
+    apt update
+    apt install python3 python3-yaml --assume-yes
+    BUCKET_NAME_VALUE="ml-jspt-$SHORT_SHA-$_BUILD_ID" python3 /workspace/render_deployment.py
+
+    kubectl apply -f /workspace/deployment-rendered.yaml
+    kubectl rollout status deployment/jetstream-pytorch-server --timeout=900s
+
+    echo "pass" > /workspace/jspt_deploy_result.txt
+  allowFailure: true
+  waitFor: ['jetstream-pytorch: run checkpoint conversion']
+
+- id: 'jetstream-pytorch: test guide'
+  name: "gcr.io/cloud-builders/kubectl"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jspt_test_guide.txt
+
+    kubectl port-forward svc/jetstream-svc 8000:8000 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+    python3 /workspace/inference-servers/jetstream/pytorch/single-host-inference/tests/test.py http://127.0.0.1:8000
+
+    echo "pass" > /workspace/jspt_test_guide.txt
+  allowFailure: true
+  waitFor: ['jetstream-pytorch: deploy server']
+
+- id: 'jetstream-pytorch: cleanup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/jspt_cleanup_result.txt
+
+    if [ -f /workspace/jspt_gsa_name.txt ]; then
+      GSA_NAME=$(cat /workspace/jspt_gsa_name.txt)
+      gcloud projects remove-iam-policy-binding $PROJECT_ID \
+        --member="serviceAccount:$${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+        --role=roles/storage.objectUser --condition=None || true
+      gcloud projects remove-iam-policy-binding $PROJECT_ID \
+        --member="serviceAccount:$${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+        --role=roles/storage.insightsCollectorService --condition=None || true
+      gcloud iam service-accounts delete \
+        "$${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+        --project=$PROJECT_ID --quiet || true
+    fi
+
+    gcloud storage rm -r gs://ml-jspt-$SHORT_SHA-$_BUILD_ID --quiet || true
+
+    gcloud container clusters delete ml-jspt-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_JETSTREAM_PYTORCH_ZONE \
+      --project=$PROJECT_ID \
+      --quiet
+    echo "pass" > /workspace/jspt_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['jetstream-pytorch: test guide']
+
+- id: 'jetstream-pytorch: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "jetstream-pytorch") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/jspt_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-pytorch gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/jspt_workload_identity_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-pytorch workload identity setup failed\n"
+    fi
+
+    if [[ $(cat /workspace/jspt_checkpoint_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-pytorch checkpoint conversion failed\n"
+    fi
+
+    if [[ $(cat /workspace/jspt_deploy_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-pytorch server deployment failed (check --tokenizer_path for gemma - it was inferred, not verified)\n"
+    fi
+
+    if [[ $(cat /workspace/jspt_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-pytorch test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/jspt_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-pytorch cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="JetStream PyTorch CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "jetstream-pytorch", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['jetstream-pytorch: cleanup']
+
+- id: 'jetstream-pytorch: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in jspt_gke_cluster_result jspt_workload_identity_result jspt_checkpoint_result jspt_deploy_result jspt_test_guide jspt_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['jetstream-pytorch: create github issue']
+
+substitutions:
+  _JETSTREAM_PYTORCH_ZONE: us-central1-a
+  _JETSTREAM_PYTORCH_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
+    env: "HF_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

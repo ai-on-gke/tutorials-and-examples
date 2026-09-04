@@ -1,0 +1,325 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Deploys the vLLM-served Llama 3.1-8B model (nvidia-l4) plus the ADK agent
+# that wraps it behind LlamaFirewall, then proves the firewall actually
+# intercepts a jailbreak prompt (not just that the agent is alive) - same
+# style of test already proven for adk/llama/vllm in this repo.
+
+steps:
+- id: "llama-firewall: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/security/llama-firewall/tests /workspace/security/llama-firewall/tests
+
+- id: "llama-firewall: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/security/llama-firewall/terraform"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["llama-firewall: prepare tests"]
+
+- id: 'llama-firewall: create gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/security/llama-firewall/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llama_firewall_gke_cluster_result.txt
+    terraform apply \
+    -var-file=example.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=ml-llama-firewall-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_LLAMA_FIREWALL_REGION \
+    -var=subnetwork_region=$_LLAMA_FIREWALL_REGION \
+    -var=subnetwork_cidr=10.129.0.0/20 \
+    -var=image_repository_name=ml-llama-firewall-$SHORT_SHA-$_BUILD_ID \
+    -auto-approve -no-color
+    echo "pass" > /workspace/llama_firewall_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ['llama-firewall: validate platform']
+
+- id: "llama-firewall: build adk-agent"
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/security/llama-firewall/adk-app"
+  args:
+  - builds
+  - submit
+  - --tag
+  - us-central1-docker.pkg.dev/${PROJECT_ID}/ml-llama-firewall-${SHORT_SHA}-${_BUILD_ID}/secured-agent:latest
+  - .
+  allowFailure: true
+  waitFor: ['llama-firewall: create gke cluster']
+
+- id: 'llama-firewall: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-llama-firewall-${SHORT_SHA}-${_BUILD_ID}'
+  - '--region=${_LLAMA_FIREWALL_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['llama-firewall: create gke cluster']
+
+- id: 'llama-firewall: allocate L4 GPU'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llama_firewall_allocate_l4_gpu_result.txt
+
+    cat <<EOF > /workspace/gpu-l4-allocation.yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: my-gpu-pod
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-accelerator: "nvidia-l4"
+      containers:
+      - name: my-gpu-container
+        image: nvidia/cuda:11.0.3-runtime-ubuntu20.04
+        command: ["/bin/bash", "-c", "--"]
+        args: ["while true; do sleep 600; done;"]
+        resources:
+          requests:
+            cpu: "2"
+            memory: "10Gi"
+            nvidia.com/gpu: "1"
+    EOF
+
+    kubectl apply -f /workspace/gpu-l4-allocation.yaml
+    kubectl wait --for=condition=Ready pod/my-gpu-pod --timeout=1200s
+    echo "The GPU allocation is completed"
+
+    echo "pass" > /workspace/llama_firewall_allocate_l4_gpu_result.txt
+  allowFailure: true
+  waitFor: ['llama-firewall: generate kubeconfig']
+
+- id: "llama-firewall: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/security/llama-firewall"
+  secretEnv: ["HF_TOKEN"]
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/llama_firewall_test_guide.txt
+
+    kubectl create secret generic hf-token-secret \
+        --from-literal=token=$$HF_TOKEN \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl delete -f /workspace/gpu-l4-allocation.yaml --ignore-not-found
+
+    kubectl apply -f vllm/vllm-llama.yaml
+    kubectl rollout status deployment/vllm-llama3 --timeout=600s
+
+    # vllm-llama.yaml defines no readinessProbe, so "rollout status" reports
+    # success as soon as the container starts, before the OpenAI-compatible
+    # server has actually finished loading the 8B model - wait for the real
+    # startup marker in the logs, same technique already proven in
+    # ci-resources/adk/llama/vllm/cloudbuild.yaml.
+    sleep_seconds=10
+    search_string="Application startup complete."
+    max_wait_seconds=600
+    elapsed=0
+    while true; do
+      # Re-resolve the pod name each iteration - if the pod was evicted/OOM-killed
+      # and recreated while the 8B model was still loading, a name captured once
+      # up front would point at a pod that no longer exists and this loop would
+      # spin on kubectl logs errors forever.
+      pod_name=$(kubectl get pods -l app=llama3-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+      if [[ -n "$pod_name" ]] && kubectl logs "$pod_name" --tail=100 2>/dev/null | grep -q -m 1 "$search_string"; then
+        echo "SUCCESS: vLLM server is up."
+        break
+      fi
+      if [[ $elapsed -ge $max_wait_seconds ]]; then
+        echo "ERROR: vLLM server did not report startup complete within ${max_wait_seconds}s."
+        exit 1
+      fi
+      echo "  Not ready yet (pod: ${pod_name:-<none>}), sleeping ${sleep_seconds}s."
+      sleep ${sleep_seconds}s
+      elapsed=$((elapsed + sleep_seconds))
+    done
+
+    # terraform already rendered this from templates/secured-agent.yaml.tftpl
+    # with the real image tag filled in
+    kubectl apply -f /workspace/security/llama-firewall/gen/secured-agent.yaml
+    kubectl rollout status deployment/adk-agent --timeout=600s
+    kubectl port-forward svc/adk-agent 8001:80 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+    python3 /workspace/security/llama-firewall/tests/test.py http://127.0.0.1:8001
+
+    echo "pass" > /workspace/llama_firewall_test_guide.txt
+  allowFailure: true
+  waitFor: ['llama-firewall: allocate L4 GPU', 'llama-firewall: build adk-agent']
+
+- id: 'llama-firewall: cleanup gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/security/llama-firewall/terraform"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llama_firewall_cleanup_gke_cluster.txt
+    terraform destroy \
+    -var-file=example.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=ml-llama-firewall-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_LLAMA_FIREWALL_REGION \
+    -var=subnetwork_region=$_LLAMA_FIREWALL_REGION \
+    -var=subnetwork_cidr=10.129.0.0/20 \
+    -var=image_repository_name=ml-llama-firewall-$SHORT_SHA-$_BUILD_ID \
+    -auto-approve -no-color
+    echo "pass" > /workspace/llama_firewall_cleanup_gke_cluster.txt
+  allowFailure: true
+  waitFor: ['llama-firewall: test guide']
+
+- id: 'llama-firewall: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "llama-firewall") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/llama_firewall_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* llama-firewall gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/llama_firewall_allocate_l4_gpu_result.txt) != "pass" ]]; then
+      failed_steps+="* llama-firewall L4 GPU allocation failed\n"
+    fi
+
+    if [[ $(cat /workspace/llama_firewall_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* llama-firewall test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/llama_firewall_cleanup_gke_cluster.txt) != "pass" ]]; then
+      failed_steps+="* llama-firewall gke cluster cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="LlamaFirewall CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "llama-firewall", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['llama-firewall: cleanup gke cluster']
+
+- id: 'llama-firewall: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in llama_firewall_gke_cluster_result llama_firewall_allocate_l4_gpu_result llama_firewall_test_guide llama_firewall_cleanup_gke_cluster; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['llama-firewall: create github issue']
+
+substitutions:
+  _LLAMA_FIREWALL_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
+    env: "HF_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

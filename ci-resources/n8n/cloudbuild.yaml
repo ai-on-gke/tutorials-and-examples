@@ -1,0 +1,378 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# n8n's own terraform only renders manifests/values files (gen/ollama.yaml,
+# gen/n8n-common-values.yaml, gen/n8n-service-type-*.yaml) - it doesn't
+# install the n8n Helm release itself, so this pipeline does that with the
+# chart the tutorial doc (https://gke-ai-labs.dev/docs/agentic/n8n/) is
+# inferred to use: oci://8gears.container-registry.com/library/n8n. Not
+# verified live, same treatment as mlflow's community-charts/mlflow chart
+# assumption earlier in this branch. The Deployment/Service names ("n8n") are
+# also an assumption based on that chart's standard Helm fullname template.
+#
+# See ci-resources/n8n/tests/test.py for the much bigger caveat: driving
+# n8n's internal (undocumented) /rest/* API for owner setup, credential
+# creation, workflow activation, and the chat webhook contract. This is the
+# most speculative pipeline built this session.
+#
+# Same Autopilot + L4 GPU pattern already proven by agentic-llamaindex/rag
+# and adk/llama/vllm in this repo (placeholder pod to force node
+# provisioning, then delete it and deploy the real GPU workload).
+
+steps:
+- id: "n8n: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/n8n/tests /workspace/n8n/tests
+
+- id: "n8n: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/n8n/terraform"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["n8n: prepare tests"]
+
+- id: 'n8n: create gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/n8n/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/n8n_gke_cluster_result.txt
+    terraform apply \
+    -var-file=example.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=default_resource_name=ml-n8n-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_N8N_REGION \
+    -var=subnetwork_region=$_N8N_REGION \
+    -var=subnetwork_cidr=10.132.0.0/20 \
+    -var=cloudsql_instance_region=$_N8N_REGION \
+    -auto-approve -no-color
+    echo "pass" > /workspace/n8n_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ['n8n: validate platform']
+
+- id: 'n8n: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-n8n-${SHORT_SHA}-${_BUILD_ID}'
+  - '--region=${_N8N_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['n8n: create gke cluster']
+
+- id: 'n8n: allocate L4 GPU'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/n8n_allocate_l4_gpu_result.txt
+
+    cat <<EOF > /workspace/gpu-l4-allocation.yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: my-gpu-pod
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-accelerator: "nvidia-l4"
+      containers:
+      - name: my-gpu-container
+        image: nvidia/cuda:11.0.3-runtime-ubuntu20.04
+        command: ["/bin/bash", "-c", "--"]
+        args: ["while true; do sleep 600; done;"]
+        resources:
+          requests:
+            cpu: "2"
+            memory: "10Gi"
+            nvidia.com/gpu: "1"
+    EOF
+
+    kubectl apply -f /workspace/gpu-l4-allocation.yaml
+    kubectl wait --for=condition=Ready pod/my-gpu-pod --timeout=1200s
+    echo "The GPU allocation is completed"
+
+    echo "pass" > /workspace/n8n_allocate_l4_gpu_result.txt
+  allowFailure: true
+  waitFor: ['n8n: generate kubeconfig']
+
+- id: 'n8n: deploy ollama'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/n8n_deploy_ollama_result.txt
+
+    kubectl delete -f /workspace/gpu-l4-allocation.yaml --ignore-not-found
+    # terraform already rendered this from templates/ollama/ollama.yaml.tftpl
+    # with the real workload-identity service account and GCS bucket filled in
+    kubectl apply -f /workspace/n8n/gen/ollama.yaml
+    kubectl rollout status deployment/ollama --timeout=600s
+    sleep 60s
+    kubectl exec "$(kubectl get pod -l app=ollama -o name)" -c ollama -- ollama pull llama3.2
+
+    echo "pass" > /workspace/n8n_deploy_ollama_result.txt
+  allowFailure: true
+  waitFor: ['n8n: allocate L4 GPU']
+
+- id: 'n8n: deploy n8n'
+  name: "gcr.io/${PROJECT_ID}/helm"
+  dir: "/workspace/n8n"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/n8n_deploy_n8n_result.txt
+
+    helm install n8n oci://8gears.container-registry.com/library/n8n \
+      -f gen/n8n-common-values.yaml \
+      -f gen/n8n-service-type-clusterip.yaml \
+      --wait --timeout 10m
+
+    echo "pass" > /workspace/n8n_deploy_n8n_result.txt
+  env:
+  - "CLOUDSDK_COMPUTE_REGION=${_N8N_REGION}"
+  - "CLOUDSDK_CONTAINER_CLUSTER=ml-n8n-${SHORT_SHA}-${_BUILD_ID}"
+  allowFailure: true
+  waitFor: ['n8n: generate kubeconfig']
+
+- id: 'n8n: seed database'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/n8n/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/n8n_seed_database_result.txt
+
+    DB_HOST=$(terraform output -raw cloudsql_instance_ip)
+    DB_NAME=$(terraform output -raw cloudsql_db_name)
+    DB_USER=$(terraform output -raw cloudsql_db_user)
+    DB_PASSWORD=$(kubectl get secret db-secret -o jsonpath='{.data.password}' | base64 -d)
+
+    echo "$$DB_HOST" > /workspace/n8n_db_host.txt
+    echo "$$DB_NAME" > /workspace/n8n_db_name.txt
+    echo "$$DB_USER" > /workspace/n8n_db_user.txt
+    echo "$$DB_PASSWORD" > /workspace/n8n_db_password.txt
+
+    kubectl run psql-seed --rm -i --restart=Never --image=postgres:15 \
+      --env="PGPASSWORD=$$DB_PASSWORD" \
+      --command -- psql -h $$DB_HOST -U $$DB_USER -d $$DB_NAME -c \
+      "CREATE TABLE zephyr_orders (id SERIAL PRIMARY KEY, item TEXT, quantity INT); INSERT INTO zephyr_orders (item, quantity) VALUES ('nebula lantern', 12);"
+
+    echo "pass" > /workspace/n8n_seed_database_result.txt
+  allowFailure: true
+  waitFor: ['n8n: create gke cluster', 'n8n: generate kubeconfig']
+
+- id: 'n8n: test guide'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/n8n_test_guide.txt
+
+    kubectl port-forward svc/n8n 5678:5678 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+
+    DB_HOST=$(cat /workspace/n8n_db_host.txt)
+    DB_NAME=$(cat /workspace/n8n_db_name.txt)
+    DB_USER=$(cat /workspace/n8n_db_user.txt)
+    DB_PASSWORD=$(cat /workspace/n8n_db_password.txt)
+
+    python3 /workspace/n8n/tests/test.py http://127.0.0.1:5678 \
+      "$$DB_HOST" 5432 "$$DB_NAME" "$$DB_USER" "$$DB_PASSWORD" \
+      zephyr_orders /workspace/n8n/workflow.json
+
+    echo "pass" > /workspace/n8n_test_guide.txt
+  allowFailure: true
+  waitFor: ['n8n: deploy n8n', 'n8n: deploy ollama', 'n8n: seed database']
+
+- id: 'n8n: cleanup gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/n8n/terraform"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/n8n_cleanup_gke_cluster.txt
+    terraform destroy \
+    -var-file=example.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=default_resource_name=ml-n8n-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_N8N_REGION \
+    -var=subnetwork_region=$_N8N_REGION \
+    -var=subnetwork_cidr=10.132.0.0/20 \
+    -var=cloudsql_instance_region=$_N8N_REGION \
+    -auto-approve -no-color
+    echo "pass" > /workspace/n8n_cleanup_gke_cluster.txt
+  allowFailure: true
+  waitFor: ['n8n: test guide']
+
+- id: 'n8n: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "n8n") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/n8n_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* n8n gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/n8n_allocate_l4_gpu_result.txt) != "pass" ]]; then
+      failed_steps+="* n8n L4 GPU allocation failed\n"
+    fi
+
+    if [[ $(cat /workspace/n8n_deploy_ollama_result.txt) != "pass" ]]; then
+      failed_steps+="* n8n ollama deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/n8n_deploy_n8n_result.txt) != "pass" ]]; then
+      failed_steps+="* n8n helm deployment failed (check the community chart assumption)\n"
+    fi
+
+    if [[ $(cat /workspace/n8n_seed_database_result.txt) != "pass" ]]; then
+      failed_steps+="* n8n database seeding failed\n"
+    fi
+
+    if [[ $(cat /workspace/n8n_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* n8n test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/n8n_cleanup_gke_cluster.txt) != "pass" ]]; then
+      failed_steps+="* n8n gke cluster cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="n8n CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "n8n", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['n8n: cleanup gke cluster']
+
+- id: 'n8n: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in n8n_gke_cluster_result n8n_allocate_l4_gpu_result n8n_deploy_ollama_result n8n_deploy_n8n_result n8n_seed_database_result n8n_test_guide n8n_cleanup_gke_cluster; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['n8n: create github issue']
+
+substitutions:
+  _N8N_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

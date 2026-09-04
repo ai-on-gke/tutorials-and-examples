@@ -1,0 +1,275 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# The example's manifests hardcode an image reference to someone's personal
+# project (us-east1-docker.pkg.dev/rick-vertex-ai/...), so this builds the
+# real image from build/server/ first and substitutes it in. Only the web
+# client (build/webapp/) is skipped - it's a demo frontend, not the model
+# server this tutorial is actually about, so this tests the server's
+# /generate endpoint directly.
+#
+# create-cluster.sh's TPU pool uses --spot; this pipeline uses on-demand
+# instead, since a preempted TPU mid-CI-run would be a flaky-test problem the
+# tutorial itself doesn't have to deal with.
+
+steps:
+- id: "maxdiffusion: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/inference-servers/maxdiffusion/tests /workspace/inference-servers/maxdiffusion/tests
+
+- id: 'maxdiffusion: create gke cluster'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/maxdiff_gke_cluster_result.txt
+    gcloud container clusters create ml-maxdiff-$SHORT_SHA-$_BUILD_ID \
+      --location=$_MAXDIFFUSION_REGION \
+      --workload-pool=$PROJECT_ID.svc.id.goog \
+      --enable-image-streaming \
+      --enable-ip-alias \
+      --node-locations=$_MAXDIFFUSION_ZONE \
+      --addons=GcsFuseCsiDriver \
+      --no-enable-master-authorized-networks \
+      --machine-type=n2d-standard-4 \
+      --num-nodes=1 \
+      --project=$PROJECT_ID
+    gcloud container node-pools create tpu \
+      --location=$_MAXDIFFUSION_REGION --cluster=ml-maxdiff-$SHORT_SHA-$_BUILD_ID \
+      --node-locations=$_MAXDIFFUSION_ZONE \
+      --machine-type=ct5lp-hightpu-1t --num-nodes=1 \
+      --enable-image-streaming \
+      --project=$PROJECT_ID
+    echo "pass" > /workspace/maxdiff_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ["maxdiffusion: prepare tests"]
+
+- id: 'maxdiffusion: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-maxdiff-${SHORT_SHA}-${_BUILD_ID}'
+  - '--location=${_MAXDIFFUSION_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['maxdiffusion: create gke cluster']
+
+- id: 'maxdiffusion: create artifact registry repo'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'artifacts'
+  - 'repositories'
+  - 'create'
+  - 'ml-maxdiff-${SHORT_SHA}-${_BUILD_ID}'
+  - '--repository-format=docker'
+  - '--location=us'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ["maxdiffusion: prepare tests"]
+
+- id: 'maxdiffusion: build server image'
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/inference-servers/maxdiffusion/build/server"
+  args:
+  - 'builds'
+  - 'submit'
+  - '--tag'
+  - us-docker.pkg.dev/${PROJECT_ID}/ml-maxdiff-${SHORT_SHA}-${_BUILD_ID}/max-diffusion:latest
+  - '.'
+  allowFailure: true
+  waitFor: ['maxdiffusion: create artifact registry repo']
+
+- id: 'maxdiffusion: deploy server'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/inference-servers/maxdiffusion"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/maxdiff_deploy_result.txt
+
+    sed "s#us-east1-docker.pkg.dev/rick-vertex-ai/gke-llm/max-diffusion:latest#us-docker.pkg.dev/${PROJECT_ID}/ml-maxdiff-${SHORT_SHA}-${_BUILD_ID}/max-diffusion:latest#" \
+      serve_sdxl_v5e.yaml > /workspace/serve_sdxl_v5e-rendered.yaml
+
+    kubectl apply -f /workspace/serve_sdxl_v5e-rendered.yaml
+    kubectl wait --for=condition=Available --timeout=600s deployment/stable-diffusion-deployment
+
+    echo "pass" > /workspace/maxdiff_deploy_result.txt
+  allowFailure: true
+  waitFor: ['maxdiffusion: generate kubeconfig', 'maxdiffusion: build server image']
+
+- id: 'maxdiffusion: test guide'
+  name: "gcr.io/cloud-builders/kubectl"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/maxdiff_test_guide.txt
+
+    kubectl port-forward svc/max-diffusion-server 8000:8000 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+    # The server compiles the SDXL pipeline at import time (before it even
+    # starts listening), so retries/timeout are handled inside test.py itself.
+    python3 /workspace/inference-servers/maxdiffusion/tests/test.py http://127.0.0.1:8000
+
+    echo "pass" > /workspace/maxdiff_test_guide.txt
+  allowFailure: true
+  waitFor: ['maxdiffusion: deploy server']
+
+- id: 'maxdiffusion: cleanup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/maxdiff_cleanup_result.txt
+    gcloud container clusters delete ml-maxdiff-$SHORT_SHA-$_BUILD_ID \
+      --location=$_MAXDIFFUSION_REGION \
+      --project=$PROJECT_ID \
+      --quiet
+    gcloud artifacts repositories delete ml-maxdiff-$SHORT_SHA-$_BUILD_ID \
+      --location=us \
+      --project=$PROJECT_ID \
+      --quiet || true
+    echo "pass" > /workspace/maxdiff_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['maxdiffusion: test guide']
+
+- id: 'maxdiffusion: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "maxdiffusion") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/maxdiff_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* maxdiffusion gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/maxdiff_deploy_result.txt) != "pass" ]]; then
+      failed_steps+="* maxdiffusion server deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/maxdiff_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* maxdiffusion test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/maxdiff_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* maxdiffusion cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="MaxDiffusion CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "maxdiffusion", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['maxdiffusion: cleanup']
+
+- id: 'maxdiffusion: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in maxdiff_gke_cluster_result maxdiff_deploy_result maxdiff_test_guide maxdiff_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['maxdiffusion: create github issue']
+
+substitutions:
+  _MAXDIFFUSION_REGION: us-east1
+  _MAXDIFFUSION_ZONE: us-east1-c
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

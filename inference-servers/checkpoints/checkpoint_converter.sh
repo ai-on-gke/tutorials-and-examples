@@ -85,8 +85,8 @@ download_huggingface_checkpoint() {
     if [ ! -d "/base" ]; then
         mkdir /base/
     fi 
-    huggingface-cli login --token $(cat ${HUGGINGFACE_TOKEN_DIR}/HUGGINGFACE_TOKEN)
-    huggingface-cli download ${MODEL_PATH} --local-dir ${INPUT_CKPT_DIR_LOCAL}
+    hf auth login --token $(cat ${HUGGINGFACE_TOKEN_DIR}/HUGGINGFACE_TOKEN)
+    hf download ${MODEL_PATH} --local-dir ${INPUT_CKPT_DIR_LOCAL}
 
     echo "$(date '+%Y-%m-%d %H:%M:%S'): Completed downloading model ${MODEL_PATH}"
 
@@ -102,7 +102,7 @@ download_huggingface_checkpoint() {
     elif [[ $MODEL_NAME == *"gemma"* ]]; then
         TOKENIZER_PATH=/base/tokenizer.model
         if [[ $MODEL_PATH == *"gemma-2b-it-pytorch"* ]]; then
-            huggingface-cli download google/gemma-2b-pytorch config.json \
+            hf download google/gemma-2b-pytorch config.json \
             --local-dir ${INPUT_CKPT_DIR_LOCAL}
         fi
     else

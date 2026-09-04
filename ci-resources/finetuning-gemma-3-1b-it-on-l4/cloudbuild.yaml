@@ -1,0 +1,284 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This is a deploy-and-verify pipeline distinct from the lightweight build-only
+# finetuning-gemma-3-1b-it-on-l4/cloudbuild.yaml that already lives in the
+# example directory, following the same ci-resources/ convention as
+# adk/vertex, flowise, and ray-serve.
+#
+# IMPORTANT: finetune.py's last two lines call model.push_to_hub(...) /
+# tokenizer.push_to_hub(...). The existing cloudbuild-hf-token secret (reused
+# by autoscale, blue-green-gateway, etc.) only needs to be READ-scoped for
+# those pipelines to download gated models - this pipeline additionally needs
+# it to be WRITE-scoped, or it needs its own write-scoped token, or the last
+# step of finetune.py will fail with a 401/403. Whoever owns that token should
+# confirm its scope before relying on this pipeline being green.
+#
+# Also note: every successful run pushes a real new model repo to the Hugging
+# Face account behind that token (name made unique per build below so runs
+# don't clobber each other) - nothing in this pipeline deletes it afterward,
+# so those will accumulate over time and should be pruned periodically.
+
+steps:
+- id: "finetune-gemma-l4: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/finetuning-gemma-3-1b-it-on-l4/tests /workspace/finetuning-gemma-3-1b-it-on-l4/tests
+
+- id: 'finetune-gemma-l4: create gke cluster'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/finetune_gemma_l4_gke_cluster_result.txt
+    gcloud container clusters create-auto ml-fgl4-$SHORT_SHA-$_BUILD_ID \
+      --project=$PROJECT_ID \
+      --region=$_FINETUNE_GEMMA_L4_REGION
+    echo "pass" > /workspace/finetune_gemma_l4_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ["finetune-gemma-l4: prepare tests"]
+
+- id: 'finetune-gemma-l4: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-fgl4-${SHORT_SHA}-${_BUILD_ID}'
+  - '--region=${_FINETUNE_GEMMA_L4_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['finetune-gemma-l4: create gke cluster']
+
+- id: 'finetune-gemma-l4: create artifact registry repo'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'artifacts'
+  - 'repositories'
+  - 'create'
+  - 'ml-fgl4-${SHORT_SHA}-${_BUILD_ID}'
+  - '--repository-format=docker'
+  - '--location=us'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ["finetune-gemma-l4: prepare tests"]
+
+- id: 'finetune-gemma-l4: build image'
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/finetuning-gemma-3-1b-it-on-l4"
+  args:
+  - 'builds'
+  - 'submit'
+  - '--tag'
+  - us-docker.pkg.dev/${PROJECT_ID}/ml-fgl4-${SHORT_SHA}-${_BUILD_ID}/finetune-gemma-gpu:latest
+  - '.'
+  allowFailure: true
+  waitFor: ['finetune-gemma-l4: create artifact registry repo']
+
+- id: 'finetune-gemma-l4: run finetuning job'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/finetuning-gemma-3-1b-it-on-l4"
+  secretEnv: ["HF_TOKEN"]
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/finetune_gemma_l4_job_result.txt
+
+    NEW_MODEL="gemma-3-1b-it-sql-finetuned-ci-$SHORT_SHA-$_BUILD_ID"
+    echo "$$NEW_MODEL" > /workspace/finetune_gemma_l4_new_model.txt
+
+    kubectl create secret generic hf-secret \
+      --from-literal=hf_api_token=$$HF_TOKEN \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    # Substitute the built image, a unique push target, and a much smaller
+    # dataset/log cadence so a CI run finishes in minutes instead of the full
+    # tutorial's default 1000-example run. Each substitution is anchored to
+    # its "- name: X" line (not the bare value) so it can't accidentally
+    # match an unrelated env var that happens to share the same value.
+    sed \
+      -e "s#<IMAGE_URL>#us-docker.pkg.dev/${PROJECT_ID}/ml-fgl4-${SHORT_SHA}-${_BUILD_ID}/finetune-gemma-gpu:latest#" \
+      -e "/name: NEW_MODEL/{n;s#value: \".*\"#value: \"$${NEW_MODEL}\"#}" \
+      -e '/name: DATASET_LIMIT/{n;s#value: ".*"#value: "50"#}' \
+      -e '/name: LOGGING_STEPS/{n;s#value: ".*"#value: "2"#}' \
+      finetune.yaml > /workspace/finetune-gemma-l4-job.yaml
+
+    kubectl apply -f /workspace/finetune-gemma-l4-job.yaml
+    kubectl wait --for=condition=complete job/finetune-job --timeout=1800s
+
+    echo "pass" > /workspace/finetune_gemma_l4_job_result.txt
+  allowFailure: true
+  waitFor: ['finetune-gemma-l4: build image', 'finetune-gemma-l4: create artifact registry repo']
+
+- id: 'finetune-gemma-l4: test guide'
+  name: "gcr.io/cloud-builders/kubectl"
+  secretEnv: ["HF_TOKEN"]
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/finetune_gemma_l4_test_guide.txt
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install huggingface_hub
+
+    NEW_MODEL=$(cat /workspace/finetune_gemma_l4_new_model.txt)
+    python3 /workspace/finetuning-gemma-3-1b-it-on-l4/tests/test.py "$$NEW_MODEL" "$$HF_TOKEN"
+
+    echo "pass" > /workspace/finetune_gemma_l4_test_guide.txt
+  allowFailure: true
+  waitFor: ['finetune-gemma-l4: run finetuning job']
+
+- id: 'finetune-gemma-l4: cleanup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/finetune_gemma_l4_cleanup_result.txt
+    gcloud container clusters delete ml-fgl4-$SHORT_SHA-$_BUILD_ID \
+      --project=$PROJECT_ID \
+      --region=$_FINETUNE_GEMMA_L4_REGION \
+      --quiet
+    gcloud artifacts repositories delete ml-fgl4-$SHORT_SHA-$_BUILD_ID \
+      --location=us \
+      --project=$PROJECT_ID \
+      --quiet || true
+    echo "pass" > /workspace/finetune_gemma_l4_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['finetune-gemma-l4: test guide']
+
+- id: 'finetune-gemma-l4: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "finetuning-gemma-3-1b-it-on-l4") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/finetune_gemma_l4_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* finetuning-gemma-3-1b-it-on-l4 gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/finetune_gemma_l4_job_result.txt) != "pass" ]]; then
+      failed_steps+="* finetuning-gemma-3-1b-it-on-l4 finetuning job failed\n"
+    fi
+
+    if [[ $(cat /workspace/finetune_gemma_l4_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* finetuning-gemma-3-1b-it-on-l4 test guide failed (check whether cloudbuild-hf-token has write scope)\n"
+    fi
+
+    if [[ $(cat /workspace/finetune_gemma_l4_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* finetuning-gemma-3-1b-it-on-l4 cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Finetuning Gemma 3-1B-it on L4 CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "finetuning-gemma-3-1b-it-on-l4", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['finetune-gemma-l4: cleanup']
+
+- id: 'finetune-gemma-l4: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in finetune_gemma_l4_gke_cluster_result finetune_gemma_l4_job_result finetune_gemma_l4_test_guide finetune_gemma_l4_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['finetune-gemma-l4: create github issue']
+
+substitutions:
+  _FINETUNE_GEMMA_L4_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
+    env: "HF_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

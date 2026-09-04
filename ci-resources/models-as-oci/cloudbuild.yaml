@@ -1,0 +1,207 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This REUSES the exact download/build/push steps already proven in the
+# example's own build-only cloudbuild.yaml (left untouched), and adds a real
+# verification step at the end: pull the pushed image back down and check the
+# expected model files actually made it in, rather than stopping at "the
+# build succeeded". No GKE cluster needed - this tutorial is about packaging
+# a model as an OCI artifact, not serving it.
+#
+# Kept the same default model (huggingfaceh4/zephyr-7b-beta) as the existing
+# pipeline rather than substituting something smaller, since the Dockerfile's
+# `COPY model/*.safetensors` glob will hard-fail the build if the chosen
+# model doesn't ship safetensors weights, and zephyr-7b-beta is a known-good
+# default already proven by the existing pipeline.
+
+steps:
+- id: 'models-as-oci: download model'
+  name: 'python:3.10-slim'
+  entrypoint: 'bash'
+  secretEnv: ["HUGGINGFACE_TOKEN"]
+  args:
+  - '-c'
+  - |
+    set -e
+    pip install hf_transfer
+    pip install huggingface_hub[hf_transfer]
+
+    mkdir -p /workspace/model
+
+    export HF_HUB_ENABLE_HF_TRANSFER=1
+    hf auth login --token $$HUGGINGFACE_TOKEN
+    hf download $_MOAOCI_MODEL_NAME --local-dir /workspace/model
+  waitFor: ["-"]
+
+- id: 'models-as-oci: create artifact registry repo'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'artifacts'
+  - 'repositories'
+  - 'create'
+  - 'ml-moaoci-${SHORT_SHA}-${_BUILD_ID}'
+  - '--repository-format=docker'
+  - '--location=us'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ["-"]
+
+- id: 'models-as-oci: build image'
+  name: 'gcr.io/cloud-builders/docker'
+  env:
+  - "DOCKER_BUILDKIT=1"
+  dir: "/workspace/models-as-oci"
+  args:
+  - build
+  - '-t'
+  - us-docker.pkg.dev/${PROJECT_ID}/ml-moaoci-${SHORT_SHA}-${_BUILD_ID}/${_MOAOCI_IMAGE_NAME}
+  - '-f'
+  - '/workspace/models-as-oci/Dockerfile'
+  - '/workspace'
+  allowFailure: true
+  waitFor: ['models-as-oci: download model']
+
+- id: 'models-as-oci: push image'
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-docker.pkg.dev/${PROJECT_ID}/ml-moaoci-${SHORT_SHA}-${_BUILD_ID}/${_MOAOCI_IMAGE_NAME}']
+  allowFailure: true
+  waitFor: ['models-as-oci: build image', 'models-as-oci: create artifact registry repo']
+
+- id: 'models-as-oci: test guide'
+  name: 'gcr.io/cloud-builders/docker'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/moaoci_test_result.txt
+
+    docker pull us-docker.pkg.dev/${PROJECT_ID}/ml-moaoci-${SHORT_SHA}-${_BUILD_ID}/${_MOAOCI_IMAGE_NAME}
+
+    # The image has no CMD/ENTRYPOINT (it's meant to be used as a model-data
+    # source, not run directly), so override the entrypoint just to list
+    # what actually landed in /model.
+    FILE_LIST=$(docker run --rm --entrypoint=/bin/sh \
+      us-docker.pkg.dev/${PROJECT_ID}/ml-moaoci-${SHORT_SHA}-${_BUILD_ID}/${_MOAOCI_IMAGE_NAME} \
+      -c "ls -la /model")
+    echo "$$FILE_LIST"
+
+    if ! echo "$$FILE_LIST" | grep -q '\.safetensors'; then
+      echo "No .safetensors file found in /model - the OCI image does not actually contain model weights."
+      exit 1
+    fi
+    if ! echo "$$FILE_LIST" | grep -q 'config.json'; then
+      echo "No config.json found in /model - the OCI image is missing model config."
+      exit 1
+    fi
+
+    echo "pass" > /workspace/moaoci_test_result.txt
+  allowFailure: true
+  waitFor: ['models-as-oci: push image']
+
+- id: 'models-as-oci: cleanup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    gcloud artifacts repositories delete ml-moaoci-$SHORT_SHA-$_BUILD_ID \
+      --location=us \
+      --project=$PROJECT_ID \
+      --quiet || true
+  waitFor: ['models-as-oci: test guide']
+
+- id: 'models-as-oci: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "models-as-oci") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    if [[ $(cat /workspace/moaoci_test_result.txt) != "pass" ]]; then
+      issue_title="Models as OCI CI/CD Failure: Some steps have failed"
+      issue_body="The models-as-oci verification pipeline failed - the built OCI image did not contain the expected model files."
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "models-as-oci", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['models-as-oci: cleanup']
+
+- id: 'models-as-oci: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+    if [[ $(cat /workspace/moaoci_test_result.txt) != "pass" ]]; then
+      echo "models-as-oci test failed"
+      exit 1
+    fi
+  waitFor: ['models-as-oci: create github issue']
+
+substitutions:
+  _MOAOCI_MODEL_NAME: 'huggingfaceh4/zephyr-7b-beta'
+  _MOAOCI_IMAGE_NAME: 'zephyr-7b-beta'
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  diskSizeGb: '100'
+  machineType: "E2_HIGHCPU_32"
+timeout: 3600s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
+    env: "HUGGINGFACE_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

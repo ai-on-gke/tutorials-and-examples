@@ -1,0 +1,263 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# The only worked example in this directory (examples/llama3.1-405b) converts
+# a 405-billion-parameter checkpoint: ~2000GB of RAM, an m1-ultramem-160 node,
+# and 9-10 hours per the example's own README - completely impractical for
+# CI. This instead runs the exact same checkpoint_converter.sh tool/image
+# against meta-llama/Llama-2-7b-hf via the HuggingFace path, which the script
+# itself runs on CPU only (export JAX_PLATFORMS=cpu), needing no GKE cluster
+# or TPU/GPU at all - just a Cloud Build step with enough RAM.
+#
+# CAVEAT: meta-llama/Llama-2-7b-hf is a gated HuggingFace model, separately
+# from Gemma's gating - this pipeline reuses the existing cloudbuild-hf-token
+# secret, but that account needs to have specifically accepted Llama 2's
+# license on huggingface.co for this to pass. Not verified from this
+# environment.
+
+steps:
+- id: "checkpoints: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/inference-servers/checkpoints/tests /workspace/inference-servers/checkpoints/tests
+
+- id: 'checkpoints: write hf token file'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["HF_TOKEN"]
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+    mkdir -p /workspace/hf-token-dir
+    printf '%s' "$$HF_TOKEN" > /workspace/hf-token-dir/HUGGINGFACE_TOKEN
+
+- id: 'checkpoints: create gcs bucket'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'storage'
+  - 'buckets'
+  - 'create'
+  - 'gs://ml-ckpt-${SHORT_SHA}-${_BUILD_ID}'
+  - '--project=${PROJECT_ID}'
+  - '--location=${_CHECKPOINTS_REGION}'
+  allowFailure: true
+  waitFor: ["checkpoints: prepare tests"]
+
+- id: 'checkpoints: create artifact registry repo'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'artifacts'
+  - 'repositories'
+  - 'create'
+  - 'ml-ckpt-${SHORT_SHA}-${_BUILD_ID}'
+  - '--repository-format=docker'
+  - '--location=us'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ["checkpoints: prepare tests"]
+
+- id: 'checkpoints: build converter image'
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/inference-servers/checkpoints"
+  args:
+  - 'builds'
+  - 'submit'
+  - '--tag'
+  - us-docker.pkg.dev/${PROJECT_ID}/ml-ckpt-${SHORT_SHA}-${_BUILD_ID}/checkpoint-converter:latest
+  - '.'
+  allowFailure: true
+  waitFor: ["checkpoints: create artifact registry repo"]
+
+- id: 'checkpoints: run conversion'
+  name: 'gcr.io/cloud-builders/docker'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/ckpt_conversion_result.txt
+
+    chmod 0400 /workspace/hf-token-dir/HUGGINGFACE_TOKEN
+
+    # The converter image's tag depends on ${_BUILD_ID}, which Cloud Build
+    # can never resolve if used as a step's own `name:` field - step names
+    # must be valid image references before the build (and so ${_BUILD_ID})
+    # exists at all, so a step can't use an image it built earlier in the
+    # same build as its own execution container. Run it via `docker run`
+    # instead, on the `cloudbuild` network so it still gets the same ambient
+    # build credentials a `name:`-referenced step would.
+    docker run --rm --network=cloudbuild \
+      -v /workspace/hf-token-dir:/huggingface \
+      us-docker.pkg.dev/${PROJECT_ID}/ml-ckpt-${SHORT_SHA}-${_BUILD_ID}/checkpoint-converter:latest \
+      /usr/bin/checkpoint_converter.sh \
+      --bucket_name=ml-ckpt-$SHORT_SHA-$_BUILD_ID \
+      --inference_server=jetstream-maxtext \
+      --model_name=llama-2 \
+      --model_path=meta-llama/Llama-2-7b-hf \
+      --huggingface=True \
+      --output_directory=gs://ml-ckpt-$SHORT_SHA-$_BUILD_ID/llama-2-7b/final
+
+    echo "pass" > /workspace/ckpt_conversion_result.txt
+  allowFailure: true
+  waitFor: ['checkpoints: create gcs bucket', 'checkpoints: build converter image', 'checkpoints: write hf token file']
+
+- id: 'checkpoints: test guide'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/ckpt_test_guide.txt
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install google-cloud-storage
+
+    python3 /workspace/inference-servers/checkpoints/tests/test.py \
+      ml-ckpt-$SHORT_SHA-$_BUILD_ID \
+      llama-2-7b/final/bf16/unscanned/checkpoints
+
+    echo "pass" > /workspace/ckpt_test_guide.txt
+  allowFailure: true
+  waitFor: ['checkpoints: run conversion']
+
+- id: 'checkpoints: cleanup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/ckpt_cleanup_result.txt
+    gcloud storage rm -r gs://ml-ckpt-$SHORT_SHA-$_BUILD_ID --quiet || true
+    gcloud artifacts repositories delete ml-ckpt-$SHORT_SHA-$_BUILD_ID \
+      --location=us \
+      --project=$PROJECT_ID \
+      --quiet || true
+    echo "pass" > /workspace/ckpt_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['checkpoints: test guide']
+
+- id: 'checkpoints: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "inference-checkpoints") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/ckpt_conversion_result.txt) != "pass" ]]; then
+      failed_steps+="* checkpoints conversion failed (check whether cloudbuild-hf-token has accepted the Llama 2 license)\n"
+    fi
+
+    if [[ $(cat /workspace/ckpt_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* checkpoints test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/ckpt_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* checkpoints cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Inference Checkpoints CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "inference-checkpoints", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['checkpoints: cleanup']
+
+- id: 'checkpoints: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in ckpt_conversion_result ckpt_test_guide ckpt_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['checkpoints: create github issue']
+
+substitutions:
+  _CHECKPOINTS_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_32"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-hf-token/versions/latest
+    env: "HF_TOKEN"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

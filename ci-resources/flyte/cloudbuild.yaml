@@ -1,0 +1,264 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# NOTE: this pipeline could not be executed against a live cluster while
+# writing it (no GCP credentials in the authoring environment). The Kubernetes
+# Service port names it queries for ("grpc"/"http") follow the flyteorg/flyte
+# Helm chart's documented convention but a hardcoded fallback (8089/8088) is
+# included in case that assumption is wrong on first real run.
+
+steps:
+- id: "flyte: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/flyte/tests /workspace/flyte/tests
+
+- id: "flyte: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/flyte"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["flyte: prepare tests"]
+
+- id: 'flyte: create gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/flyte"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/flyte_gke_cluster_result.txt
+    terraform apply \
+    -var-file=example_environment.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_FLYTE_REGION \
+    -var=network_name=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=subnetwork_name=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=gcs_bucket=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=db_instance_name=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=enable_gpu=false \
+    -auto-approve -no-color
+    echo "pass" > /workspace/flyte_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ['flyte: validate platform']
+
+- id: 'flyte: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-flyte-${SHORT_SHA}-${_BUILD_ID}'
+  - '--region=${_FLYTE_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['flyte: create gke cluster']
+
+- id: 'flyte: deploy flyte'
+  name: "gcr.io/${PROJECT_ID}/helm"
+  dir: "/workspace/flyte"
+  args:
+  - 'install'
+  - 'flyte-backend'
+  - 'flyteorg/flyte-binary'
+  - '-f'
+  - 'flyte.yaml'
+  env:
+  - "CLOUDSDK_COMPUTE_ZONE=${_FLYTE_REGION}"
+  - "CLOUDSDK_CONTAINER_CLUSTER=ml-flyte-${SHORT_SHA}-${_BUILD_ID}"
+  - "HELM_REPO_NAME=flyteorg"
+  - "HELM_REPO_URL=https://flyteorg.github.io/flyte/"
+  allowFailure: true
+  waitFor: ['flyte: generate kubeconfig']
+
+- id: 'flyte: test guide'
+  name: "gcr.io/cloud-builders/kubectl"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/flyte_test_guide.txt
+
+    kubectl rollout status deployment/flyte-backend-flyte-binary --timeout=600s
+
+    GRPC_PORT=$(kubectl get svc flyte-backend-flyte-binary -o jsonpath='{.spec.ports[?(@.name=="grpc")].port}')
+    if [ -z "$$GRPC_PORT" ]; then
+      echo "No service port named 'grpc' found - falling back to the flyte-binary chart's documented default (8089)."
+      kubectl get svc flyte-backend-flyte-binary -o yaml
+      GRPC_PORT=8089
+    fi
+    echo "Using gRPC port: $$GRPC_PORT"
+
+    kubectl port-forward svc/flyte-backend-flyte-binary "8089:$${GRPC_PORT}" &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install flytekit
+
+    cd /workspace/flyte/tests
+    python3 test.py localhost:8089
+
+    echo "pass" > /workspace/flyte_test_guide.txt
+  allowFailure: true
+  waitFor: ['flyte: deploy flyte']
+
+- id: 'flyte: cleanup gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/flyte"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/flyte_cleanup_gke_cluster.txt
+    terraform destroy \
+    -var-file=example_environment.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_FLYTE_REGION \
+    -var=network_name=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=subnetwork_name=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=gcs_bucket=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=db_instance_name=ml-flyte-$SHORT_SHA-$_BUILD_ID \
+    -var=enable_gpu=false \
+    -auto-approve -no-color
+    echo "pass" > /workspace/flyte_cleanup_gke_cluster.txt
+  allowFailure: true
+  waitFor: ['flyte: test guide']
+
+- id: 'flyte: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "flyte") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/flyte_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* flyte gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/flyte_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* flyte test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/flyte_cleanup_gke_cluster.txt) != "pass" ]]; then
+      failed_steps+="* flyte gke cluster cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Flyte CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "flyte", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['flyte: cleanup gke cluster']
+
+- id: 'flyte: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    if [[ $(cat /workspace/flyte_gke_cluster_result.txt) != "pass" ]]; then
+      echo "flyte gke cluster creation failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/flyte_test_guide.txt) != "pass" ]]; then
+      echo "flyte test guide failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/flyte_cleanup_gke_cluster.txt) != "pass" ]]; then
+      echo "flyte gke cluster cleanup failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['flyte: create github issue']
+
+substitutions:
+  _FLYTE_REGION: us-central1
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

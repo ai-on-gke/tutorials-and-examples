@@ -1,0 +1,388 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This is a deploy-and-verify pipeline (real cluster, real GPU, real assertions),
+# distinct from the lightweight build-only agentic-llamaindex/rag/cloudbuild.yaml that
+# already lives in the example directory. It follows the same ci-resources/ convention
+# already used by adk/vertex, adk/ray-mcp, adk/llama/vllm, ray-serve, and flowise.
+
+steps:
+- id: "agentic-llamaindex-rag: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/agentic-llamaindex/rag/tests /workspace/agentic-llamaindex/rag/tests
+
+- id: "agentic-llamaindex-rag: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/agentic-llamaindex/rag/terraform"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["agentic-llamaindex-rag: prepare tests"]
+
+- id: 'agentic-llamaindex-rag: create gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/agentic-llamaindex/rag/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llamaindex_rag_gke_cluster_result.txt
+    terraform apply \
+    -var-file=default_env.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=default_resource_name=ml-llamaindex-rag-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_LLAMAINDEX_RAG_REGION \
+    -var=autopilot_cluster=$_AUTOPILOT_CLUSTER \
+    -auto-approve -no-color
+    echo "pass" > /workspace/llamaindex_rag_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: validate platform']
+
+- id: 'agentic-llamaindex-rag: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-llamaindex-rag-${SHORT_SHA}-${_BUILD_ID}'
+  - '--region=${_LLAMAINDEX_RAG_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: create gke cluster']
+
+- id: 'agentic-llamaindex-rag: build rag image'
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/agentic-llamaindex/rag/app"
+  args:
+  - builds
+  - submit
+  - --tag
+  - us-docker.pkg.dev/${PROJECT_ID}/ml-llamaindex-rag-${SHORT_SHA}-${_BUILD_ID}/llamaindex-rag-demo:latest
+  - .
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: create gke cluster']
+
+- id: 'agentic-llamaindex-rag: allocate L4 GPU'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llamaindex_rag_allocate_l4_gpu_result.txt
+
+    cat <<EOF > /workspace/gpu-l4-allocation.yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: my-gpu-pod
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-accelerator: "nvidia-l4"
+      containers:
+      - name: my-gpu-container
+        image: nvidia/cuda:11.0.3-runtime-ubuntu20.04
+        command: ["/bin/bash", "-c", "--"]
+        args: ["while true; do sleep 600; done;"]
+        resources:
+          limits:
+            cpu: 2
+            memory: 4Gi
+            nvidia.com/gpu: 1
+    EOF
+
+    kubectl apply -f /workspace/gpu-l4-allocation.yaml
+    kubectl wait --for=condition=Ready pod/my-gpu-pod --timeout=1200s
+    echo "The GPU allocation is completed"
+
+    echo "pass" > /workspace/llamaindex_rag_allocate_l4_gpu_result.txt
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: generate kubeconfig']
+
+- id: 'agentic-llamaindex-rag: deploy ollama'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llamaindex_rag_deploy_ollama_result.txt
+
+    kubectl delete -f /workspace/gpu-l4-allocation.yaml --ignore-not-found
+    # terraform already rendered this from templates/ollama-deployment.yaml with the
+    # real workload-identity service account and GCS bucket name filled in
+    kubectl apply -f /workspace/agentic-llamaindex/rag/gen/ollama-deployment.yaml
+    kubectl rollout status deployment/ollama --timeout=600s
+    sleep 60s
+    kubectl exec "$(kubectl get pod -l app=ollama -o name)" -c ollama -- ollama pull gemma2:9b
+
+    echo "pass" > /workspace/llamaindex_rag_deploy_ollama_result.txt
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: allocate L4 GPU']
+
+- id: 'agentic-llamaindex-rag: deploy redis'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llamaindex_rag_deploy_redis_result.txt
+
+    kubectl apply -f /workspace/agentic-llamaindex/rag/redis-stack.yaml
+    kubectl rollout status deployment/redis-stack --timeout=300s
+
+    echo "pass" > /workspace/llamaindex_rag_deploy_redis_result.txt
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: generate kubeconfig']
+
+- id: 'agentic-llamaindex-rag: ingest data'
+  name: 'gcr.io/cloud-builders/kubectl'
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llamaindex_rag_ingest_data_result.txt
+
+    gsutil cp /workspace/agentic-llamaindex/rag/tests/sample-movies.csv \
+      gs://ml-llamaindex-rag-$SHORT_SHA-$_BUILD_ID/datalake/sample-movies.csv
+
+    # terraform already rendered this from templates/ingest-data-job.yaml with the
+    # real image tag, service account, and bucket name filled in
+    kubectl apply -f /workspace/agentic-llamaindex/rag/gen/ingest-data-job.yaml
+    kubectl wait --for=condition=complete job/llamaindex-ingest-data --timeout=600s
+
+    echo "pass" > /workspace/llamaindex_rag_ingest_data_result.txt
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: build rag image', 'agentic-llamaindex-rag: deploy redis']
+
+- id: 'agentic-llamaindex-rag: test guide'
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/llamaindex_rag_test_guide.txt
+
+    # terraform already rendered this from templates/rag-deployment.yaml with the
+    # real image tag and model name (gemma2:9b) filled in
+    kubectl apply -f /workspace/agentic-llamaindex/rag/gen/rag-deployment.yaml
+    kubectl rollout status deployment/llamaindex-rag --timeout=300s
+    kubectl port-forward svc/llamaindex-rag-service 8000:8000 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+    python3 /workspace/agentic-llamaindex/rag/tests/test.py http://127.0.0.1:8000
+
+    echo "pass" > /workspace/llamaindex_rag_test_guide.txt
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: deploy ollama', 'agentic-llamaindex-rag: ingest data']
+
+- id: 'agentic-llamaindex-rag: cleanup gke cluster'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/agentic-llamaindex/rag/terraform"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/llamaindex_rag_cleanup_gke_cluster.txt
+    terraform destroy \
+    -var-file=default_env.tfvars \
+    -var=project_id=$PROJECT_ID \
+    -var=default_resource_name=ml-llamaindex-rag-$SHORT_SHA-$_BUILD_ID \
+    -var=cluster_location=$_LLAMAINDEX_RAG_REGION \
+    -var=autopilot_cluster=$_AUTOPILOT_CLUSTER \
+    -auto-approve -no-color
+    echo "pass" > /workspace/llamaindex_rag_cleanup_gke_cluster.txt
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: test guide']
+
+- id: 'agentic-llamaindex-rag: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "agentic-llamaindex-rag") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/llamaindex_rag_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* agentic-llamaindex/rag gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_allocate_l4_gpu_result.txt) != "pass" ]]; then
+      failed_steps+="* agentic-llamaindex/rag L4 GPU allocation failed\n"
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_deploy_ollama_result.txt) != "pass" ]]; then
+      failed_steps+="* agentic-llamaindex/rag ollama deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_deploy_redis_result.txt) != "pass" ]]; then
+      failed_steps+="* agentic-llamaindex/rag redis deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_ingest_data_result.txt) != "pass" ]]; then
+      failed_steps+="* agentic-llamaindex/rag data ingestion failed\n"
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* agentic-llamaindex/rag test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_cleanup_gke_cluster.txt) != "pass" ]]; then
+      failed_steps+="* agentic-llamaindex/rag gke cluster cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Agentic LlamaIndex RAG CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "agentic-llamaindex-rag", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['agentic-llamaindex-rag: cleanup gke cluster']
+
+- id: 'agentic-llamaindex-rag: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    if [[ $(cat /workspace/llamaindex_rag_gke_cluster_result.txt) != "pass" ]]; then
+      echo "agentic-llamaindex/rag gke cluster creation failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_allocate_l4_gpu_result.txt) != "pass" ]]; then
+      echo "agentic-llamaindex/rag L4 GPU allocation failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_deploy_ollama_result.txt) != "pass" ]]; then
+      echo "agentic-llamaindex/rag ollama deployment failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_deploy_redis_result.txt) != "pass" ]]; then
+      echo "agentic-llamaindex/rag redis deployment failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_ingest_data_result.txt) != "pass" ]]; then
+      echo "agentic-llamaindex/rag data ingestion failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_test_guide.txt) != "pass" ]]; then
+      echo "agentic-llamaindex/rag test guide failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/llamaindex_rag_cleanup_gke_cluster.txt) != "pass" ]]; then
+      echo "agentic-llamaindex/rag gke cluster cleanup failed"
+      echo "error" > /workspace/check_result.txt
+    fi
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['agentic-llamaindex-rag: create github issue']
+
+substitutions:
+  _LLAMAINDEX_RAG_REGION: us-central1
+  _USER_NAME: github
+  _AUTOPILOT_CLUSTER: "true"
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"
