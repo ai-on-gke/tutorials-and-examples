@@ -1,0 +1,360 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Was skipped in the original batch of pipelines added to this repo for
+# needing a Kaggle credential that wasn't set up in this project at the
+# time - cloudbuild-kaggle-username/cloudbuild-kaggle-key secrets now exist,
+# so this composes them into the kaggle.json the checkpoint-conversion job
+# expects, same shape as the checkpoints pipeline composing HUGGINGFACE_TOKEN
+# from its own secret.
+#
+# Follows the README literally: 2 CPU nodes plus a 2-node v5e TPU pool
+# (ct5lp-hightpu-8t, topology 2x4 = 8 chips/node - 16 chips total across the
+# pool), sized for the maxengine-server deployment's 2 replicas.
+#
+# The test proves the server actually generated a real completion, not just
+# that the deployment came up - same technique used by models-as-oci and
+# maxdiffusion: send a real prompt to /generate and assert on real content
+# in the response, not just a 200.
+
+steps:
+- id: "jetstream-maxtext: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/inference-servers/jetstream-maxtext/tests /workspace/inference-servers/jetstream/maxtext/single-host-inference/tests
+
+      # main.tf references ../../../../../../modules/jetstream-maxtext-deployment
+      # (six levels up) - this repo was split off from GoogleCloudPlatform/ai-on-gke,
+      # which still has the referenced module, and the relative path was never
+      # updated after the split. As shipped it resolves to a path outside the repo
+      # checkout entirely (one level above /workspace) and the module doesn't exist
+      # in this repo at all. Fetching the real module and correcting the path
+      # in-place here rather than editing the example's own main.tf permanently -
+      # same "sed a rendered copy at CI time" approach maxdiffusion already uses
+      # for its own hardcoded external image reference.
+      sed -i 's#\.\./\.\./\.\./\.\./\.\./\.\./modules#../../../../../modules#' \
+        /workspace/inference-servers/jetstream/maxtext/single-host-inference/terraform/main.tf
+      git clone --depth=1 https://github.com/GoogleCloudPlatform/ai-on-gke /tmp/ai-on-gke-modules
+      mkdir -p /workspace/modules
+      cp -r /tmp/ai-on-gke-modules/modules/jetstream-maxtext-deployment /workspace/modules/jetstream-maxtext-deployment
+
+- id: 'jetstream-maxtext: create gke cluster'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jsmt_gke_cluster_result.txt
+
+    gcloud container clusters create ml-jsmt-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_JETSTREAM_MAXTEXT_ZONE \
+      --project=$PROJECT_ID \
+      --workload-pool=$PROJECT_ID.svc.id.goog \
+      --release-channel=rapid \
+      --num-nodes=2
+    gcloud container node-pools create tpu \
+      --cluster=ml-jsmt-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_JETSTREAM_MAXTEXT_ZONE \
+      --num-nodes=2 \
+      --machine-type=ct5lp-hightpu-8t \
+      --project=$PROJECT_ID
+
+    echo "pass" > /workspace/jsmt_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ["jetstream-maxtext: prepare tests"]
+
+- id: 'jetstream-maxtext: create gcs bucket'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'storage'
+  - 'buckets'
+  - 'create'
+  - 'gs://ml-jsmt-${SHORT_SHA}-${_BUILD_ID}'
+  - '--project=${PROJECT_ID}'
+  - '--location=${_JETSTREAM_MAXTEXT_REGION}'
+  allowFailure: true
+  waitFor: ["jetstream-maxtext: prepare tests"]
+
+- id: 'jetstream-maxtext: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-jsmt-${SHORT_SHA}-${_BUILD_ID}'
+  - '--zone=${_JETSTREAM_MAXTEXT_ZONE}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['jetstream-maxtext: create gke cluster']
+
+- id: 'jetstream-maxtext: convert checkpoint'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/inference-servers/jetstream/maxtext/single-host-inference"
+  secretEnv: ["KAGGLE_USERNAME", "KAGGLE_KEY"]
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jsmt_checkpoint_result.txt
+
+    gcloud iam service-accounts create ml-jsmt-$SHORT_SHA-$_BUILD_ID --project=$PROJECT_ID
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:ml-jsmt-$SHORT_SHA-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com" \
+      --role="roles/storage.objectUser" --condition=None
+    gcloud iam service-accounts add-iam-policy-binding \
+      ml-jsmt-$SHORT_SHA-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com \
+      --project=$PROJECT_ID --role=roles/iam.workloadIdentityUser \
+      --member="serviceAccount:$PROJECT_ID.svc.id.goog[default/default]"
+    kubectl annotate serviceaccount default \
+      --namespace default --overwrite \
+      iam.gke.io/gcp-service-account=ml-jsmt-$SHORT_SHA-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com
+
+    printf '{"username":"%s","key":"%s"}' "$$KAGGLE_USERNAME" "$$KAGGLE_KEY" > /workspace/kaggle.json
+    kubectl create secret generic kaggle-secret --from-file=/workspace/kaggle.json
+
+    sed "s#BUCKET_NAME#ml-jsmt-$SHORT_SHA-$_BUILD_ID#g" checkpoint-job.yaml > /workspace/checkpoint-job-rendered.yaml
+    kubectl apply -f /workspace/checkpoint-job-rendered.yaml
+    kubectl wait --for=condition=complete --timeout=1200s job/data-loader-7b
+
+    echo "pass" > /workspace/jsmt_checkpoint_result.txt
+  allowFailure: true
+  waitFor: ['jetstream-maxtext: generate kubeconfig']
+
+- id: "jetstream-maxtext: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/inference-servers/jetstream/maxtext/single-host-inference/terraform"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["jetstream-maxtext: prepare tests"]
+
+- id: 'jetstream-maxtext: deploy maxengine'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/inference-servers/jetstream/maxtext/single-host-inference/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jsmt_deploy_result.txt
+
+    terraform apply \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=ml-jsmt-$SHORT_SHA-$_BUILD_ID \
+    -var='maxengine_deployment_settings={model_name="gemma-7b",parameters_path="gs://ml-jsmt-$SHORT_SHA-$_BUILD_ID/final/unscanned/gemma_7b-it/0/checkpoints/0/items",accelerator_selectors={topology="2x4",accelerator="tpu-v5-lite-podslice",chip_count=8}}' \
+    -auto-approve -no-color
+
+    echo "pass" > /workspace/jsmt_deploy_result.txt
+  allowFailure: true
+  waitFor: ['jetstream-maxtext: validate platform', 'jetstream-maxtext: convert checkpoint']
+
+- id: "jetstream-maxtext: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jsmt_test_guide.txt
+
+    kubectl wait deployment/maxengine-server --for=condition=Available --timeout=900s
+    kubectl wait pod -l app=maxengine-server --for=condition=Ready --timeout=900s
+
+    kubectl port-forward svc/jetstream-svc 8000:8000 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+
+    python3 /workspace/inference-servers/jetstream/maxtext/single-host-inference/tests/test.py http://127.0.0.1:8000
+
+    echo "pass" > /workspace/jsmt_test_guide.txt
+  allowFailure: true
+  waitFor: ['jetstream-maxtext: deploy maxengine']
+
+- id: 'jetstream-maxtext: cleanup terraform'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/inference-servers/jetstream/maxtext/single-host-inference/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jsmt_cleanup_terraform_result.txt
+
+    terraform destroy \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=ml-jsmt-$SHORT_SHA-$_BUILD_ID \
+    -var='maxengine_deployment_settings={model_name="gemma-7b",parameters_path="gs://ml-jsmt-$SHORT_SHA-$_BUILD_ID/final/unscanned/gemma_7b-it/0/checkpoints/0/items",accelerator_selectors={topology="2x4",accelerator="tpu-v5-lite-podslice",chip_count=8}}' \
+    -auto-approve -no-color
+
+    echo "pass" > /workspace/jsmt_cleanup_terraform_result.txt
+  allowFailure: true
+  waitFor: ['jetstream-maxtext: test guide']
+
+- id: 'jetstream-maxtext: cleanup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/jsmt_cleanup_result.txt
+
+    gcloud container clusters delete ml-jsmt-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_JETSTREAM_MAXTEXT_ZONE --project=$PROJECT_ID --quiet
+    gcloud storage rm -r gs://ml-jsmt-$SHORT_SHA-$_BUILD_ID --quiet || true
+    gcloud iam service-accounts delete \
+      ml-jsmt-$SHORT_SHA-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com \
+      --project=$PROJECT_ID --quiet || true
+
+    echo "pass" > /workspace/jsmt_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['jetstream-maxtext: cleanup terraform']
+
+- id: 'jetstream-maxtext: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "inference-jetstream-maxtext") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/jsmt_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-maxtext gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/jsmt_checkpoint_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-maxtext checkpoint conversion failed (check whether cloudbuild-kaggle-key has accepted the Gemma license)\n"
+    fi
+
+    if [[ $(cat /workspace/jsmt_deploy_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-maxtext maxengine deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/jsmt_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-maxtext test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/jsmt_cleanup_terraform_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-maxtext terraform cleanup failed\n"
+    fi
+
+    if [[ $(cat /workspace/jsmt_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* jetstream-maxtext cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Jetstream MaxText CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "inference-jetstream-maxtext", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['jetstream-maxtext: cleanup']
+
+- id: 'jetstream-maxtext: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in jsmt_gke_cluster_result jsmt_checkpoint_result jsmt_deploy_result jsmt_test_guide jsmt_cleanup_terraform_result jsmt_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['jetstream-maxtext: create github issue']
+
+substitutions:
+  _JETSTREAM_MAXTEXT_REGION: us-east1
+  _JETSTREAM_MAXTEXT_ZONE: us-east1-d
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-kaggle-username/versions/latest
+    env: "KAGGLE_USERNAME"
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-kaggle-key/versions/latest
+    env: "KAGGLE_KEY"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"

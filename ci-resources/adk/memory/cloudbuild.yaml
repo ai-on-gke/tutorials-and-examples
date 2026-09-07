@@ -1,0 +1,324 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# CPU-only - same common-infra + Autopilot cluster pattern already proven by
+# ray-serve/adk-vertex/skypilot-dws-kueue in this repo, plus a CloudSQL
+# instance (adk sessions + pgvector-backed agent memory). No GPU/TPU needed
+# at all.
+#
+# The agent's own code (agent.py) reads GOOGLE_API_KEY directly via Mem0's
+# Gemini provider - there's no Vertex-AI/ADC fallback in the app as written,
+# so this needs a real Gemini API key. Assumed to live in a
+# cloudbuild-gemini-api-key secret, matching the naming convention of this
+# project's other CI secrets (cloudbuild-hf-token, cloudbuild-kaggle-key) -
+# that secret does not exist yet as of writing this pipeline, so it hasn't
+# been run live.
+#
+# terraform's own templatefile()/local_file resource renders the Deployment
+# manifest to gen/agent-with-memory.yaml as a side effect of `apply` - this
+# pipeline applies that rendered file directly rather than templating it
+# again itself.
+#
+# The test proves memory actually round-trips through Mem0 + pgvector, not
+# just that the pod is up: turn 1 tells the agent a fact and asserts the
+# save_memory tool was actually invoked (not just a text acknowledgement);
+# turn 2, in a brand-new session, asks for that fact back and asserts both
+# that search_memory was invoked and that the recalled fact appears in the
+# final response - the app's own save_memory/search_memory calls hardcode
+# user_id="user" regardless of the session's userId, so a fresh session
+# should still recall it.
+#
+# Deliberately does NOT use a `_BUILD_ID: ${BUILD_ID:0:8}` substitution for
+# per-build resource-name uniqueness, unlike this repo's other pipelines -
+# that pattern doesn't actually work. Cloud Build substitutions are opaque
+# static text with no recursive evaluation, so a custom substitution can't
+# reference another substitution (confirmed directly: `_X: ${BUILD_ID}`
+# resolves to an empty string). The literal, unevaluated text
+# "${BUILD_ID:0:8}" then lands wherever `$_BUILD_ID` is used: in a plain
+# `args:` list it's inert garbage that breaks GCP resource-name validation;
+# in an `sh`-entrypoint script dash fatals with "Bad substitution" (POSIX sh
+# has no bash-style slicing); in a `bash`-entrypoint script it silently
+# evaluates to an empty string (since $BUILD_ID isn't actually exported as
+# an env var - only Cloud Build's own text-substitution pass sees it) rather
+# than erroring, which is how this went unnoticed elsewhere. Instead, every
+# step below that needs a short build id computes it itself via
+# `echo $BUILD_ID | cut -c1-8` - $BUILD_ID is a real substitution Cloud
+# Build resolves to literal text before any shell runs, and `cut` is POSIX
+# so this is safe under both sh and bash.
+
+steps:
+- id: "adk-memory: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/adk/memory/tests /workspace/adk/memory/tests
+
+- id: "adk-memory: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/adk/memory/terraform"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["adk-memory: prepare tests"]
+
+- id: 'adk-memory: create infra'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/adk/memory/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/adkmem_infra_result.txt
+
+    BUILD_ID_SHORT=$(echo $BUILD_ID | cut -c1-8)
+
+    terraform apply \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=cluster_location=$_ADK_MEMORY_REGION \
+    -var=network_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=subnetwork_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=subnetwork_cidr=10.132.0.0/20 \
+    -var=subnetwork_region=$_ADK_MEMORY_REGION \
+    -var=image_repository_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=image_repository_location=$_ADK_MEMORY_REGION \
+    -var=cloudsql_instance_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=cloudsql_instance_region=$_ADK_MEMORY_REGION \
+    -auto-approve -no-color
+
+    echo "pass" > /workspace/adkmem_infra_result.txt
+  allowFailure: true
+  waitFor: ["adk-memory: validate platform"]
+
+- id: 'adk-memory: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    BUILD_ID_SHORT=$(echo $BUILD_ID | cut -c1-8)
+    gcloud container clusters get-credentials adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+      --region=$_ADK_MEMORY_REGION \
+      --project=$PROJECT_ID
+  allowFailure: true
+  waitFor: ['adk-memory: create infra']
+
+- id: 'adk-memory: build and push image'
+  name: 'gcr.io/cloud-builders/gcloud'
+  dir: "/workspace/adk/memory/adk-app"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    BUILD_ID_SHORT=$(echo $BUILD_ID | cut -c1-8)
+    gcloud builds submit \
+      --tag $_ADK_MEMORY_REGION-docker.pkg.dev/$PROJECT_ID/adkmem-$SHORT_SHA-$$BUILD_ID_SHORT/agent-with-memory:latest \
+      .
+  allowFailure: true
+  waitFor: ['adk-memory: create infra']
+
+- id: 'adk-memory: deploy'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/adk/memory"
+  secretEnv: ["GEMINI_API_KEY"]
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/adkmem_deploy_result.txt
+
+    kubectl create secret generic google-api-secret \
+        --from-literal=key=$$GEMINI_API_KEY \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl apply -f gen/agent-with-memory.yaml
+    kubectl rollout status deployment/adk-agent --timeout=600s
+
+    echo "pass" > /workspace/adkmem_deploy_result.txt
+  allowFailure: true
+  waitFor: ['adk-memory: generate kubeconfig', 'adk-memory: build and push image']
+
+- id: "adk-memory: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/adkmem_test_guide.txt
+
+    kubectl port-forward svc/adk-agent 8080:80 &
+    sleep 5s
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install requests
+
+    python3 /workspace/adk/memory/tests/test.py http://127.0.0.1:8080
+
+    echo "pass" > /workspace/adkmem_test_guide.txt
+  allowFailure: true
+  waitFor: ['adk-memory: deploy']
+
+- id: 'adk-memory: cleanup'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/adk/memory/terraform"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/adkmem_cleanup_result.txt
+
+    BUILD_ID_SHORT=$(echo $BUILD_ID | cut -c1-8)
+
+    terraform destroy \
+    -var=project_id=$PROJECT_ID \
+    -var=cluster_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=cluster_location=$_ADK_MEMORY_REGION \
+    -var=network_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=subnetwork_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=subnetwork_cidr=10.132.0.0/20 \
+    -var=subnetwork_region=$_ADK_MEMORY_REGION \
+    -var=image_repository_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=image_repository_location=$_ADK_MEMORY_REGION \
+    -var=cloudsql_instance_name=adkmem-$SHORT_SHA-$$BUILD_ID_SHORT \
+    -var=cloudsql_instance_region=$_ADK_MEMORY_REGION \
+    -auto-approve -no-color
+
+    echo "pass" > /workspace/adkmem_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['adk-memory: test guide']
+
+- id: 'adk-memory: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "adk-memory") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/adkmem_infra_result.txt) != "pass" ]]; then
+      failed_steps+="* adk-memory infra creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/adkmem_deploy_result.txt) != "pass" ]]; then
+      failed_steps+="* adk-memory deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/adkmem_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* adk-memory test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/adkmem_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* adk-memory cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="ADK Memory CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "adk-memory", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['adk-memory: cleanup']
+
+- id: 'adk-memory: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in adkmem_infra_result adkmem_deploy_result adkmem_test_guide adkmem_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['adk-memory: create github issue']
+
+substitutions:
+  _ADK_MEMORY_REGION: us-central1
+  _USER_NAME: github
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/cloudbuild-gemini-api-key/versions/latest
+    env: "GEMINI_API_KEY"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"
