@@ -6,7 +6,7 @@ idna==3.11
 kubernetes==34.1.0
 oauthlib==3.3.1
 prometheus_client==0.23.1
-pyasn1==0.6.1
+pyasn1==0.6.4
 pyasn1_modules==0.4.2
 python-dateutil==2.9.0.post0
 PyYAML==6.0.3
