@@ -4,5 +4,5 @@ datasets==4.2.0
 transformers==4.57.1
 peft==0.17.1
 trl==0.24.0
-torch==2.9.0
+torch==2.13.0
 huggingface-hub==0.35.3
