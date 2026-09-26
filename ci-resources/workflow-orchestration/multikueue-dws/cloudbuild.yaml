@@ -1,0 +1,296 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# NOT live-verified against a real run (unlike this batch's other new
+# pipelines) - this spins up 4 separate GKE Autopilot clusters (1 manager +
+# 3 workers across europe-west4/asia-southeast1/us-east4), a materially
+# bigger and more expensive footprint than any other pipeline in this repo,
+# so it was written and statically validated (Cloud Build accepts the
+# config) but deliberately not run end-to-end from this environment.
+#
+# dws-multi.yaml hardcodes its MultiKueueCluster secret references
+# (worker-asia-southeast1-secret, etc.) to match deploy-multikueue.sh's
+# default kubeconfig context names - so unlike every other pipeline in this
+# repo, cluster names here are intentionally left at the example's own
+# terraform defaults (manager-<region>, worker-<region>) rather than made
+# per-build-unique, to avoid forking dws-multi.yaml just to parameterize
+# them. Same collision/leftover-state risk already accepted for metaflow's
+# AR repo name in ci-resources/metaflow/cloudbuild.yaml applies here, times
+# four clusters - mitigated with a best-effort pre-cleanup, not eliminated.
+#
+# Skips deploy-multikueue.sh's training-operator/ray-operator/mpi-operator/
+# appwrapper installs - those support job types (RayJob, PyTorchJob, etc.)
+# this test doesn't exercise; job-multi-dws-autopilot.yaml is a plain
+# batch/v1 Job, which only needs JobSet + Kueue + MultiKueue itself.
+#
+# The test proves a job submitted to the manager cluster's queue actually
+# gets dispatched to and completed on one of the three worker clusters via
+# MultiKueue - not merely that the manager's queue/admission-check objects
+# exist.
+
+steps:
+- id: "multikueue-dws: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/workflow-orchestration/multikueue-dws/tests /workspace/workflow-orchestration/multikueue-dws/tests
+
+      echo "Best-effort cleanup of any leftover clusters/network from an aborted prior run."
+      for c in manager-europe-west4 worker-europe-west4 worker-asia-southeast1 worker-us-east4; do
+        loc=$(echo $c | sed 's/^manager-//; s/^worker-//')
+        gcloud container clusters delete $c --region=$loc --project=$PROJECT_ID --quiet 2>/dev/null || true
+      done
+      gcloud compute networks delete dws-network --project=$PROJECT_ID --quiet 2>/dev/null || true
+
+- id: "multikueue-dws: validate platform"
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/workflow-orchestration/multikueue-dws/tf"
+  script: |
+    terraform init -no-color
+    terraform validate -no-color
+  waitFor: ["multikueue-dws: prepare tests"]
+
+- id: 'multikueue-dws: create clusters'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/workflow-orchestration/multikueue-dws/tf"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/multikueue_clusters_result.txt
+    terraform apply -var=project_id=$PROJECT_ID -auto-approve -no-color
+    echo "pass" > /workspace/multikueue_clusters_result.txt
+  allowFailure: true
+  waitFor: ["multikueue-dws: validate platform"]
+
+- id: 'multikueue-dws: generate kubeconfigs'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    gcloud container clusters get-credentials manager-europe-west4 --region=europe-west4 --project=$PROJECT_ID
+    gcloud container clusters get-credentials worker-europe-west4 --region=europe-west4 --project=$PROJECT_ID
+    gcloud container clusters get-credentials worker-asia-southeast1 --region=asia-southeast1 --project=$PROJECT_ID
+    gcloud container clusters get-credentials worker-us-east4 --region=us-east4 --project=$PROJECT_ID
+
+    kubectl config rename-context gke_${PROJECT_ID}_europe-west4_manager-europe-west4 manager-europe-west4
+    kubectl config rename-context gke_${PROJECT_ID}_europe-west4_worker-europe-west4 worker-europe-west4
+    kubectl config rename-context gke_${PROJECT_ID}_asia-southeast1_worker-asia-southeast1 worker-asia-southeast1
+    kubectl config rename-context gke_${PROJECT_ID}_us-east4_worker-us-east4 worker-us-east4
+  allowFailure: true
+  waitFor: ['multikueue-dws: create clusters']
+
+- id: 'multikueue-dws: deploy multikueue'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/workflow-orchestration/multikueue-dws"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/multikueue_deploy_result.txt
+
+    KUEUE_VERSION=v0.11.4
+    JOBSET_VERSION=v0.6.0
+    contexts=(manager-europe-west4 worker-asia-southeast1 worker-us-east4 worker-europe-west4)
+
+    for ctx in "${contexts[@]}"; do
+      kubectl config use-context $ctx
+      kubectl apply --force-conflicts --server-side -f https://github.com/kubernetes-sigs/jobset/releases/download/$$JOBSET_VERSION/manifests.yaml
+      kubectl apply --force-conflicts --server-side -f https://github.com/kubernetes-sigs/kueue/releases/download/$$KUEUE_VERSION/manifests.yaml
+      kubectl wait --for=condition=available --timeout=600s deployment/kueue-controller-manager -n kueue-system
+      if [[ "$ctx" != "manager-europe-west4" ]]; then
+        bash create-multikueue-kubeconfig.sh $ctx.kubeconfig
+      fi
+    done
+
+    kubectl config use-context manager-europe-west4
+    for ctx in worker-asia-southeast1 worker-us-east4 worker-europe-west4; do
+      kubectl create secret generic $ctx-secret -n kueue-system --from-file=kubeconfig=$ctx.kubeconfig
+    done
+    kubectl patch deployment kueue-controller-manager -n kueue-system --patch \
+      '{"spec":{"template":{"spec":{"containers":[{"name":"manager","args":["--config=/controller_manager_config.yaml","--zap-log-level=8","--feature-gates=MultiKueueBatchJobWithManagedBy=true"]}]}}}}'
+    kubectl rollout status deployment/kueue-controller-manager -n kueue-system --timeout=300s
+    kubectl apply --server-side -f dws-multi.yaml
+
+    for ctx in worker-asia-southeast1 worker-us-east4 worker-europe-west4; do
+      kubectl config use-context $ctx
+      kubectl apply --server-side -f dws-multi-worker.yaml
+      kubectl wait clusterqueue/dws-cluster-queue --for=condition=Active --timeout=120s
+    done
+
+    kubectl config use-context manager-europe-west4
+    for cluster in multikueue-dws-worker-asia multikueue-dws-worker-us multikueue-dws-worker-eu; do
+      kubectl wait multikueuecluster/$cluster --for=condition=Active --timeout=180s
+    done
+
+    echo "pass" > /workspace/multikueue_deploy_result.txt
+  allowFailure: true
+  waitFor: ['multikueue-dws: generate kubeconfigs']
+
+- id: "multikueue-dws: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/workflow-orchestration/multikueue-dws"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/multikueue_test_guide.txt
+
+    kubectl config use-context manager-europe-west4
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+
+    JOB_NAME=$(kubectl create -f job-multi-dws-autopilot.yaml -o jsonpath='{.metadata.name}')
+
+    python3 /workspace/workflow-orchestration/multikueue-dws/tests/test.py "$$JOB_NAME"
+
+    echo "pass" > /workspace/multikueue_test_guide.txt
+  allowFailure: true
+  waitFor: ['multikueue-dws: deploy multikueue']
+
+- id: 'multikueue-dws: cleanup'
+  name: "gcr.io/${PROJECT_ID}/terraform"
+  dir: "/workspace/workflow-orchestration/multikueue-dws/tf"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "fail" > /workspace/multikueue_cleanup_result.txt
+    terraform destroy -var=project_id=$PROJECT_ID -auto-approve -no-color
+    echo "pass" > /workspace/multikueue_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['multikueue-dws: test guide']
+
+- id: 'multikueue-dws: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "workflow-orchestration-multikueue-dws") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/multikueue_clusters_result.txt) != "pass" ]]; then
+      failed_steps+="* multikueue-dws cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/multikueue_deploy_result.txt) != "pass" ]]; then
+      failed_steps+="* multikueue-dws multikueue deployment failed\n"
+    fi
+
+    if [[ $(cat /workspace/multikueue_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* multikueue-dws test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/multikueue_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* multikueue-dws cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Workflow Orchestration MultiKueue DWS CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "workflow-orchestration-multikueue-dws", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['multikueue-dws: cleanup']
+
+- id: 'multikueue-dws: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in multikueue_clusters_result multikueue_deploy_result multikueue_test_guide multikueue_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['multikueue-dws: create github issue']
+
+substitutions:
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 5400s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"
