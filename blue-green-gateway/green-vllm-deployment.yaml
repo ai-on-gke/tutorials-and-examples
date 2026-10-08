@@ -21,7 +21,7 @@ spec:
       containers:
       - name: inference-server
         # Using a standard vLLM container image
-        image: vllm/vllm-openai:v0.11.0
+        image: vllm/vllm-openai:v0.30.0
         # resources defines the CPU, memory, and GPU required by the container.
         resources:
           requests:

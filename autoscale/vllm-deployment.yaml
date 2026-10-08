@@ -26,7 +26,7 @@ spec:
     spec:
       containers:
       - name: inference-server
-        image: vllm/vllm-openai:v0.11.0
+        image: vllm/vllm-openai:v0.30.0
         resources:
           # Requesting a GPU is the critical step that triggers GKE Autopilot to provision a node
           # with the necessary hardware. Limits are set to match requests for predictable performance.

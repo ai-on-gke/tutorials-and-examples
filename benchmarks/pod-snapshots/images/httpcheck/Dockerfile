@@ -1,4 +1,4 @@
-FROM golang:1.22 AS builder
+FROM golang:1.25 AS builder
 
 COPY client.go /client.go
 RUN CGO_ENABLED=0 go build -o /httpclient /client.go
