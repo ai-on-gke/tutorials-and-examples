@@ -1,7 +1,7 @@
 # Ubuntu:22.04
 # Use Ubuntu 22.04 from Docker Hub.
 # https://hub.docker.com/_/ubuntu/tags?page=1&name=22.04
-FROM ubuntu:22.04
+FROM ubuntu:25.10
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV MAXTEXT_VERSION=jetstream-v0.2.2
