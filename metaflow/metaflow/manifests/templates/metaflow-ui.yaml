@@ -41,7 +41,7 @@ spec:
           ports:
             - containerPort: 8083
         - name: cloud-sql-proxy
-          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.26.0
           args:
             - "--private-ip"
             - "--structured-logs"

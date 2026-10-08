@@ -35,7 +35,7 @@ spec:
             mountPath:  /config
       containers:
       - name: inference-server
-        image: vllm/vllm-openai:v0.11.0
+        image: vllm/vllm-openai:v0.30.0
         resources:
           requests:
             cpu: "2"
