@@ -17,7 +17,7 @@
 # since maxtext's setup.sh now requires 3.12+ (was fine on 22.04's 3.10 when
 # this Dockerfile was first written).
 # https://hub.docker.com/_/ubuntu/tags?page=1&name=24.04
-FROM ubuntu:24.04
+FROM ubuntu:25.10
 
 ENV DEBIAN_FRONTEND=noninteractive
 # Ubuntu 24.04 marks the system Python as externally-managed (PEP 668).
