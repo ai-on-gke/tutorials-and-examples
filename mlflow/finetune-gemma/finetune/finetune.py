@@ -188,7 +188,7 @@ with mlflow.start_run() as run:
     model.config.pretraining_tp = 1
 
     # Load LLaMA tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right" # Fix weird overflow issue with fp16 training
 
