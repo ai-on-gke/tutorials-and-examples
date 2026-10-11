@@ -1,0 +1,230 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# NOT live-verified against a real run - the tool's own README states it
+# "Only support[s] A3+ GPUs" (nvidia-smi --gpu-reset against real hardware,
+# via a hostPath mount into the node's own NVIDIA driver install), and A3
+# machine types are the single most expensive GPU class used anywhere in
+# this repo's CI, often reservation-only. Uses a3-highgpu-1g (the smallest
+# A3 shape, 1x H100) rather than the larger shapes to minimize cost for
+# whoever eventually runs this for real. Written and statically validated
+# (Cloud Build accepts the config) but deliberately not run end-to-end from
+# this environment.
+#
+# Forces RESET_THRESHOLD_DAYS=-1 - the tool's own default (60 days) would
+# always skip the reset on a CI node that's only minutes old, since it only
+# resets nodes whose uptime already exceeds the threshold.
+#
+# The test proves a real reset happened - not just that run.sh exited zero,
+# which it also does when the tool decides to skip the reset - by asserting
+# the gpu-reset.gke.io/last-reset-seconds label was actually written, and
+# that the node is Ready and uncordoned again afterward (the cleanup trap
+# ran to completion).
+
+steps:
+- id: "gpu-reset-tool: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/gpu-reset-tool/tests /workspace/gpu-reset-tool/tests
+
+- id: 'gpu-reset-tool: create gke cluster'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/gpu_reset_gke_cluster_result.txt
+
+    gcloud container clusters create ml-gpu-reset-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_GPU_RESET_ZONE \
+      --project=$PROJECT_ID \
+      --release-channel=rapid \
+      --num-nodes=1 \
+      --machine-type=e2-standard-4
+    gcloud container node-pools create a3-pool \
+      --cluster=ml-gpu-reset-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_GPU_RESET_ZONE \
+      --project=$PROJECT_ID \
+      --machine-type=a3-highgpu-1g \
+      --accelerator=type=nvidia-h100-80gb,count=1,gpu-driver-version=DEFAULT \
+      --num-nodes=1
+
+    echo "pass" > /workspace/gpu_reset_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ["gpu-reset-tool: prepare tests"]
+
+- id: 'gpu-reset-tool: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-gpu-reset-${SHORT_SHA}-${_BUILD_ID}'
+  - '--zone=${_GPU_RESET_ZONE}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['gpu-reset-tool: create gke cluster']
+
+- id: "gpu-reset-tool: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/gpu-reset-tool"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/gpu_reset_test_guide.txt
+
+    export NODE_NAME=$(kubectl get nodes -l cloud.google.com/gke-nodepool=a3-pool -o jsonpath='{.items[0].metadata.name}')
+    export RESET_THRESHOLD_DAYS=-1
+    echo "Targeting node: $$NODE_NAME"
+
+    chmod +x run.sh
+    ./run.sh
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+
+    python3 /workspace/gpu-reset-tool/tests/test.py "$$NODE_NAME"
+
+    echo "pass" > /workspace/gpu_reset_test_guide.txt
+  allowFailure: true
+  waitFor: ['gpu-reset-tool: generate kubeconfig']
+
+- id: 'gpu-reset-tool: cleanup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/gpu_reset_cleanup_result.txt
+
+    gcloud container clusters delete ml-gpu-reset-$SHORT_SHA-$_BUILD_ID \
+      --zone=$_GPU_RESET_ZONE --project=$PROJECT_ID --quiet
+
+    echo "pass" > /workspace/gpu_reset_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['gpu-reset-tool: test guide']
+
+- id: 'gpu-reset-tool: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "gpu-reset-tool") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/gpu_reset_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* gpu-reset-tool gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/gpu_reset_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* gpu-reset-tool test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/gpu_reset_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* gpu-reset-tool cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="GPU Reset Tool CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "gpu-reset-tool", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['gpu-reset-tool: cleanup']
+
+- id: 'gpu-reset-tool: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in gpu_reset_gke_cluster_result gpu_reset_test_guide gpu_reset_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['gpu-reset-tool: create github issue']
+
+substitutions:
+  _GPU_RESET_ZONE: us-central1-a
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 3600s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"
