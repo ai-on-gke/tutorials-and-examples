@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+FROM nvidia/cuda:13.4.2-runtime-ubuntu22.04
 
 RUN apt-get update && \
     apt-get -y --no-install-recommends install python3-dev gcc python3-pip git && \
