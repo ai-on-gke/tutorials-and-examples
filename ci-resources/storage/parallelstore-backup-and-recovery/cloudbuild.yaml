@@ -1,0 +1,421 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# NOT live-verified against a real run (unlike this batch's other new
+# pipelines). This example ships no terraform/infra of its own - its README
+# just links out to a separate GCP doc for the prerequisite VPC/private-
+# services-access/GKE-with-Parallelstore-CSI setup - so every resource below
+# is authored fresh for CI rather than adapted from existing example code.
+# It also provisions a Parallelstore instance, whose minimum capacity is
+# 12,000 GiB (12 TB, per `gcloud beta parallelstore instances create
+# --help`) - the single most expensive and slowest-to-provision resource of
+# any pipeline in this repo. Written and statically validated (Cloud Build
+# accepts the config) but deliberately not run end-to-end from this
+# environment given that cost/time.
+#
+# Uses plain gcloud rather than terraform, matching the no-terraform style
+# already used elsewhere in this repo (autoscale, model-armor's cluster
+# creation) - there's no existing example terraform to build on here, and
+# standing up a new terraform module just for CI-only infra didn't seem
+# worth the added state-management surface.
+#
+# The test proves a real export actually landed in GCS: writes a marker file
+# into the mounted Parallelstore volume, triggers the example's own backup
+# CronJob as a one-off Job, then asserts that exact marker file shows up in
+# the destination GCS path - not just that the export command exited zero.
+
+steps:
+- id: "parallelstore-backup: prepare tests"
+  name: "gcr.io/cloud-builders/gcloud"
+  entrypoint: "bash"
+  args:
+    - '-c'
+    - |
+      cp -r /workspace/ci-resources/storage/parallelstore-backup-and-recovery/tests /workspace/storage/parallelstore-backup-and-recovery/tests
+
+- id: 'parallelstore-backup: create network'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/ps_network_result.txt
+
+    gcloud compute networks create ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --subnet-mode=custom
+    gcloud compute networks subnets create ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --network=ml-ps-$_BUILD_ID \
+      --region=$_PARALLELSTORE_REGION --range=10.100.0.0/20
+
+    gcloud compute addresses create ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --global --purpose=VPC_PEERING \
+      --prefix-length=24 --network=ml-ps-$_BUILD_ID
+    gcloud services vpc-peerings connect \
+      --project=$PROJECT_ID --service=servicenetworking.googleapis.com \
+      --ranges=ml-ps-$_BUILD_ID --network=ml-ps-$_BUILD_ID
+
+    echo "pass" > /workspace/ps_network_result.txt
+  allowFailure: true
+  waitFor: ["parallelstore-backup: prepare tests"]
+
+- id: 'parallelstore-backup: create gcs bucket'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'storage'
+  - 'buckets'
+  - 'create'
+  - 'gs://ml-ps-${_BUILD_ID}'
+  - '--project=${PROJECT_ID}'
+  - '--location=${_PARALLELSTORE_REGION}'
+  allowFailure: true
+  waitFor: ["parallelstore-backup: prepare tests"]
+
+- id: 'parallelstore-backup: create gke cluster'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/ps_gke_cluster_result.txt
+
+    gcloud container clusters create ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID \
+      --location=$_PARALLELSTORE_REGION \
+      --network=ml-ps-$_BUILD_ID \
+      --subnetwork=ml-ps-$_BUILD_ID \
+      --workload-pool=$PROJECT_ID.svc.id.goog \
+      --addons=ParallelstoreCsiDriver \
+      --enable-ip-alias \
+      --num-nodes=1 \
+      --machine-type=e2-standard-4
+
+    echo "pass" > /workspace/ps_gke_cluster_result.txt
+  allowFailure: true
+  waitFor: ['parallelstore-backup: create network']
+
+- id: 'parallelstore-backup: create parallelstore instance'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/ps_instance_result.txt
+
+    gcloud beta parallelstore instances create ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID \
+      --location=$_PARALLELSTORE_ZONE \
+      --capacity-gib=12000 \
+      --network=ml-ps-$_BUILD_ID
+
+    echo "pass" > /workspace/ps_instance_result.txt
+  allowFailure: true
+  waitFor: ['parallelstore-backup: create network']
+
+- id: 'parallelstore-backup: generate kubeconfig'
+  name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - 'container'
+  - 'clusters'
+  - 'get-credentials'
+  - 'ml-ps-${_BUILD_ID}'
+  - '--location=${_PARALLELSTORE_REGION}'
+  - '--project=${PROJECT_ID}'
+  allowFailure: true
+  waitFor: ['parallelstore-backup: create gke cluster']
+
+- id: 'parallelstore-backup: deploy and seed data'
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/storage/parallelstore-backup-and-recovery"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/ps_deploy_result.txt
+
+    PSTORE_IP=$(gcloud beta parallelstore instances describe ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --location=$_PARALLELSTORE_ZONE \
+      --format="value(accessPoints[0])")
+
+    kubectl apply -f parallelstore-sa.yaml
+    gcloud iam service-accounts create ml-ps-$_BUILD_ID --project=$PROJECT_ID
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:ml-ps-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com" \
+      --role="roles/parallelstore.admin" --condition=None
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:ml-ps-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com" \
+      --role="roles/storage.admin" --condition=None
+    gcloud iam service-accounts add-iam-policy-binding \
+      ml-ps-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com \
+      --project=$PROJECT_ID --role=roles/iam.workloadIdentityUser \
+      --member="serviceAccount:$PROJECT_ID.svc.id.goog[default/parallelstore-sa]"
+    kubectl annotate serviceaccount parallelstore-sa \
+      --namespace default --overwrite \
+      iam.gke.io/gcp-service-account=ml-ps-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com
+
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: PersistentVolume
+    metadata:
+      name: pstore-pv
+    spec:
+      capacity:
+        storage: 12000Gi
+      accessModes:
+      - ReadWriteMany
+      persistentVolumeReclaimPolicy: Retain
+      csi:
+        driver: parallelstore.csi.storage.gke.io
+        volumeHandle: "$$PSTORE_IP/default_daos_pool/default_daos_cont"
+    ---
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: pstore-pvc
+      namespace: default
+    spec:
+      accessModes:
+      - ReadWriteMany
+      storageClassName: ""
+      volumeName: pstore-pv
+      resources:
+        requests:
+          storage: 12000Gi
+    EOF
+    kubectl wait pvc/pstore-pvc --for=jsonpath='{.status.phase}'=Bound --timeout=300s
+
+    MARKER=ci-marker-$_BUILD_ID
+    echo "$$MARKER" > /workspace/ps_marker.txt
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: pstore-seed
+      annotations:
+        gke-parallelstore/cpu-limit: "0"
+        gke-parallelstore/ephemeral-storage-limit: "0"
+        gke-parallelstore/memory-limit: "0"
+        gke-parallelstore/volumes: "true"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: seed
+        image: busybox
+        command: ["sh", "-c", "mkdir -p /data-ps/backup-test && echo $$MARKER > /data-ps/backup-test/$$MARKER.txt && sleep 5"]
+        volumeMounts:
+        - mountPath: /data-ps
+          name: pstore-volume
+      volumes:
+      - name: pstore-volume
+        persistentVolumeClaim:
+          claimName: pstore-pvc
+    EOF
+    kubectl wait pod/pstore-seed --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s
+
+    echo "pass" > /workspace/ps_deploy_result.txt
+  allowFailure: true
+  waitFor: ['parallelstore-backup: generate kubeconfig', 'parallelstore-backup: create parallelstore instance', 'parallelstore-backup: create gcs bucket']
+
+- id: "parallelstore-backup: test guide"
+  name: "gcr.io/cloud-builders/kubectl"
+  dir: "/workspace/storage/parallelstore-backup-and-recovery"
+  env:
+  - "KUBE_LOAD_CONFIG_FILE=false"
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/ps_test_guide.txt
+
+    sed \
+      -e "s#PSTORE_MOUNT_PATH#/data-ps#g" \
+      -e "s#PSTORE_NAME#ml-ps-$_BUILD_ID#g" \
+      -e "s#PSTORE_LOCATION#$_PARALLELSTORE_ZONE#g" \
+      -e "s#SOURCE_PARALLELSTORE_PATH#/backup-test#g" \
+      -e "s#DESTINATION_GCS_URI#gs://ml-ps-$_BUILD_ID/backup#g" \
+      -e "s#DELETE_AFTER_BACKUP#false#g" \
+      -e "s#PSTORE_PVC_NAME#pstore-pvc#g" \
+      -e "s#PSTORE_PV_NAME#pstore-volume#g" \
+      ps-to-gcs-backup.yaml > /workspace/ps-to-gcs-backup-rendered.yaml
+
+    kubectl apply -f /workspace/ps-to-gcs-backup-rendered.yaml
+    kubectl create job --from=cronjob/ps-to-gcs-backup ps-to-gcs-backup-manual
+
+    apt update
+    apt install python3-venv --assume-yes
+    apt install python3-pip --assume-yes
+    pip install google-cloud-storage
+
+    python3 /workspace/storage/parallelstore-backup-and-recovery/tests/test.py \
+      ps-to-gcs-backup-manual \
+      ml-ps-$_BUILD_ID \
+      "backup/backup-test/$(cat /workspace/ps_marker.txt).txt"
+
+    echo "pass" > /workspace/ps_test_guide.txt
+  allowFailure: true
+  waitFor: ['parallelstore-backup: deploy and seed data']
+
+- id: 'parallelstore-backup: cleanup'
+  name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    set -e
+    echo "fail" > /workspace/ps_cleanup_result.txt
+
+    gcloud beta parallelstore instances delete ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --location=$_PARALLELSTORE_ZONE --quiet || true
+    gcloud container clusters delete ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --location=$_PARALLELSTORE_REGION --quiet || true
+    gcloud storage rm -r gs://ml-ps-$_BUILD_ID --quiet || true
+    gcloud services vpc-peerings delete \
+      --project=$PROJECT_ID --service=servicenetworking.googleapis.com \
+      --network=ml-ps-$_BUILD_ID --quiet || true
+    gcloud compute addresses delete ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --global --quiet || true
+    gcloud compute networks subnets delete ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --region=$_PARALLELSTORE_REGION --quiet || true
+    gcloud compute networks delete ml-ps-$_BUILD_ID \
+      --project=$PROJECT_ID --quiet || true
+    gcloud iam service-accounts delete \
+      ml-ps-$_BUILD_ID@$PROJECT_ID.iam.gserviceaccount.com \
+      --project=$PROJECT_ID --quiet || true
+
+    echo "pass" > /workspace/ps_cleanup_result.txt
+  allowFailure: true
+  waitFor: ['parallelstore-backup: test guide']
+
+- id: 'parallelstore-backup: create github issue'
+  name: 'gcr.io/cloud-builders/gcloud'
+  secretEnv: ["GH_CLIENT_ID", "GH_PEM"]
+  entrypoint: 'bash'
+  args:
+  - -c
+  - |
+    apt update
+    apt install jq curl python3-venv python3-pip --assume-yes
+    pip install PyJWT cryptography
+
+    echo $_GITHUB_ISSUE
+    if [[ $_GITHUB_ISSUE != "true" ]]; then
+      exit 0
+    fi
+
+    jwt=$(python3 generate_jwt.py)
+    gh_token=$(curl --request POST \
+    --url "https://api.github.com/app/installations/90973651/access_tokens" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer $jwt" \
+    --header "X-GitHub-Api-Version: 2022-11-28" | jq -r .token)
+
+    if curl -L \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $gh_token" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues | jq -e '.[] | select(.labels[] | .name == "storage-parallelstore-backup-and-recovery") | select(.labels[] | .name == "ci/automated-issue")' > /dev/null
+    then
+      exit 0
+    fi
+
+    failed_steps=""
+
+    if [[ $(cat /workspace/ps_network_result.txt) != "pass" ]]; then
+      failed_steps+="* parallelstore-backup network setup failed\n"
+    fi
+
+    if [[ $(cat /workspace/ps_gke_cluster_result.txt) != "pass" ]]; then
+      failed_steps+="* parallelstore-backup gke cluster creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/ps_instance_result.txt) != "pass" ]]; then
+      failed_steps+="* parallelstore-backup parallelstore instance creation failed\n"
+    fi
+
+    if [[ $(cat /workspace/ps_deploy_result.txt) != "pass" ]]; then
+      failed_steps+="* parallelstore-backup deploy/seed failed\n"
+    fi
+
+    if [[ $(cat /workspace/ps_test_guide.txt) != "pass" ]]; then
+      failed_steps+="* parallelstore-backup test guide failed\n"
+    fi
+
+    if [[ $(cat /workspace/ps_cleanup_result.txt) != "pass" ]]; then
+      failed_steps+="* parallelstore-backup cleanup failed\n"
+    fi
+
+    if [[ -n "$failed_steps" ]]; then
+      issue_title="Storage Parallelstore Backup CI/CD Failure: Some steps have failed"
+      issue_body="The following steps failed in the Cloud Build pipeline:\n\n$failed_steps"
+
+      payload=$(printf '{"title":"%s","body":"%s","labels":["bug", "storage-parallelstore-backup-and-recovery", "ci/automated-issue"]}' "$issue_title" "$issue_body")
+
+      curl -L \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $gh_token" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        https://api.github.com/repos/dmitriy-drogovoz-us/tutorials-and-examples/issues \
+        -d "$payload"
+    fi
+  allowFailure: true
+  waitFor: ['parallelstore-backup: cleanup']
+
+- id: 'parallelstore-backup: check result'
+  name: "ubuntu"
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    set -e
+
+    echo "pass" > /workspace/check_result.txt
+
+    for f in ps_network_result ps_gke_cluster_result ps_instance_result ps_deploy_result ps_test_guide ps_cleanup_result; do
+      if [[ $(cat /workspace/$f.txt) != "pass" ]]; then
+        echo "$f failed"
+        echo "error" > /workspace/check_result.txt
+      fi
+    done
+
+    if [[ $(cat /workspace/check_result.txt) != "pass" ]]; then
+      cat /workspace/check_result.txt
+      exit 1
+    fi
+  waitFor: ['parallelstore-backup: create github issue']
+
+substitutions:
+  _PARALLELSTORE_REGION: us-central1
+  _PARALLELSTORE_ZONE: us-central1-a
+  _USER_NAME: github
+  _BUILD_ID: ${BUILD_ID:0:8}
+  _ITERATION: "0"
+  _GITHUB_ISSUE: "false"
+logsBucket: gs://ai-on-gke-qss-build-logs
+options:
+  substitutionOption: "ALLOW_LOOSE"
+  machineType: "E2_HIGHCPU_8"
+timeout: 7200s
+availableSecrets:
+  secretManager:
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-client-id/versions/latest
+    env: "GH_CLIENT_ID"
+  - versionName: projects/ai-on-gke-qss/secrets/tutorials-and-examples-pem/versions/latest
+    env: "GH_PEM"
